@@ -10,7 +10,7 @@ Public scripts and documentation for the solutions that [3SR](https://3sr.fr) op
 
 | Folder | Solution | Status |
 |---|---|---|
-| `ssl-managed/` | **SSL Managed**: scripts that prepare your Azure Key Vault, role assignments (RBAC) and storage so that 3SR can issue and renew your certificates without ever holding your private keys | In preparation |
+| [`ssl-managed/`](ssl-managed/) | **SSL Managed**: scripts that prepare your Azure Key Vault, role assignments (RBAC) and storage so that 3SR can issue and renew your certificates without ever holding your private keys | Available |
 | `cloudiway/` | Microsoft 365 tenant migration helpers | Planned |
 
 Each solution lives in its own folder with its own `README.md`, `CHANGELOG.md` and release notes.
