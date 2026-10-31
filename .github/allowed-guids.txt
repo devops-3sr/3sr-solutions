@@ -1,0 +1,7 @@
+# Identifiants (GUID) autorises dans ce depot public. Toute autre valeur fait echouer le controle.
+# Avant d'ajouter une ligne : verifier que l'identifiant est public ou fictif (jamais un locataire
+# ou un abonnement reel d'un client).
+aa2e6eae-63e0-4180-96f9-35a6c59c706a  # identifiant public de l'application 3SR
+a1b2c3d4-9f01-4c7e-b3aa-5d2e10f4c8b7  # exemple fictif des guides
+8e5f1a20-6c34-4b19-9e7d-2f81ab55c390  # exemple fictif des guides
+1c77b904-2d55-41a8-8b60-7ee3f9012d44  # exemple fictif des guides
