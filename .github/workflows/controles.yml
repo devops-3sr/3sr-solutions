@@ -73,16 +73,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Executer les tests Pester 5
-        shell: ${{ matrix.shell }}
-        run: |
-          Install-Module Pester -RequiredVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
-          Import-Module Pester -RequiredVersion 5.5.0
-          $config = New-PesterConfiguration
-          $config.Run.Path = 'ssl-managed/tests'
-          $config.Run.Exit = $true
-          $config.Output.Verbosity = 'Detailed'
-          Invoke-Pester -Configuration $config
+      - name: Executer les tests Pester 5 (PowerShell 7)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: ./.github/scripts/lancer-pester.ps1
+
+      - name: Executer les tests Pester 5 (Windows PowerShell 5.1)
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: ./.github/scripts/lancer-pester.ps1
 
   depot:
     name: Regles du depot
