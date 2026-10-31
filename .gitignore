@@ -58,3 +58,7 @@ claude-resume.cmd
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Sorties du collecteur Cloudiway (donnees de tenant : ne jamais publier)
+collecte-resultats/
+collecte-*.zip
