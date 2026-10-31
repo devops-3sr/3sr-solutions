@@ -33,6 +33,9 @@ customers*.json
 *.log
 *Onboarding-[0-9]*.txt
 *Offboarding-[0-9]*.txt
+*onboarding-[0-9]*.txt
+*offboarding-[0-9]*.txt
+*onboarding-simulation-*.txt
 TestResults*.xml
 coverage*.xml
 Export/
