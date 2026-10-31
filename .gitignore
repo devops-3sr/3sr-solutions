@@ -1,0 +1,57 @@
+# 3sr-solutions : dépôt PUBLIC. Ce fichier est un filet de sécurité contre les fuites.
+# Public repository: this file is a safety net against accidental leaks.
+
+# --- Certificats, clés et secrets / Certificates, keys and secrets ---
+*.pfx
+*.p12
+*.pem
+*.key
+*.crt
+*.cer
+*.csr
+*.jks
+*.kdbx
+*.env
+.env.*
+*.secret
+*.secrets
+*.pwd
+local.settings.json
+*.tfvars
+*.tfstate
+*.tfstate.*
+
+# --- Données clients / Customer data ---
+# Les fichiers de configuration clients ne doivent jamais être publiés.
+# Customer configuration files must never be published. Use *.example.json for samples.
+customers*.json
+*-ssl.json
+*-sites.json
+!*.example.json
+
+# --- Rapports et journaux d'exécution / Run reports and logs ---
+*.log
+*Onboarding-[0-9]*.txt
+*Offboarding-[0-9]*.txt
+TestResults*.xml
+coverage*.xml
+Export/
+Exports/
+
+# --- Fichiers de travail des agents et outils locaux / Local agent and tool files ---
+CLAUDE.md
+AGENTS.md
+.claude/
+.codex/
+claude-resume.cmd
+
+# --- Éditeurs et système / Editors and OS ---
+.vscode/
+.idea/
+*.swp
+*.bak
+*.tmp
+~$*
+Thumbs.db
+desktop.ini
+.DS_Store
