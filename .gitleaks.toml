@@ -1,0 +1,17 @@
+# Configuration gitleaks du depot public : regles par defaut, plus deux exceptions ciblees (faux positifs).
+title = "3sr-solutions"
+
+[extend]
+useDefault = true
+
+# Valeurs factices d'un test unitaire qui verifie le masquage des mots de passe dans un JSON.
+[[allowlists]]
+description = "Valeurs factices du test de masquage (connecteur Cloudiway)"
+targetRules = ["generic-api-key"]
+paths = ['''cloudiway/connector/tests/common\.tests\.ps1''']
+
+# Un mot d'une phrase de documentation (liste de services de synchronisation de fichiers) est pris pour un jeton.
+[[allowlists]]
+description = "Phrase de documentation du connecteur Cloudiway, aucun jeton"
+targetRules = ["dropbox-api-token"]
+paths = ['''cloudiway/connector/cloudiway-connector\.ps1''']

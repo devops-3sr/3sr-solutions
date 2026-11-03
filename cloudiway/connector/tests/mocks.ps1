@@ -44,9 +44,9 @@ function global:New-MockError([int]$Status = 403, [string]$Code = 'Authorization
 }
 
 # Erreur OAuth2 du point de terminaison /token de Microsoft : corps { error, error_description } (et non la forme { error: { code, message } } de Graph).
-function global:New-MockOAuthError([string]$Error, [string]$Description) {
-    $er = New-MockError 400 $Error $Description
-    $er.ErrorDetails = [System.Management.Automation.ErrorDetails]::new((@{ error = $Error; error_description = $Description } | ConvertTo-Json -Compress))
+function global:New-MockOAuthError([string]$OAuthError, [string]$Description) {
+    $er = New-MockError 400 $OAuthError $Description
+    $er.ErrorDetails = [System.Management.Automation.ErrorDetails]::new((@{ error = $OAuthError; error_description = $Description } | ConvertTo-Json -Compress))
     $er
 }
 # Copie profonde par aller-retour JSON : le script ne doit jamais tenir de reference vers l'etat interne du faux tenant.
