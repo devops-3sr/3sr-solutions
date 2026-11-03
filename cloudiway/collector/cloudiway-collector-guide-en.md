@@ -37,6 +37,18 @@ The script **only collects**: it produces raw data (CSV and JSON) bundled into *
 
 Safeguards: the script checks that the tenant and the account that sign in are exactly the ones you specified (`-TenantId`, `-User`); on any mismatch it disconnects and stops. Before any sign-in it checks the machine (PowerShell, modules, network, write access); if a prerequisite is missing it stops without having attempted any connection.
 
+**What this data is used for**
+
+It allows 3SR to prepare your migration without any access to your tenant:
+
+- **size the migration licences** (accounts, mailboxes, OneDrive, sites);
+- **assess volumes** and spot what needs particular attention: large OneDrive accounts, shared mailboxes, Exchange rooms and equipment, distribution lists, mailbox permissions;
+- **detect namesakes** and duplicate addresses (names, first names, addresses and aliases) before the destination accounts are prepared;
+- **prepare the mail cutover** (domains, DNS records, mail flow, connectors, transport rules);
+- **check the licences** available in the destination tenant (collection with `-Role Target`).
+
+The script is **idempotent**: running it again updates the same folder and the same archive, without duplicating anything.
+
 ## 2. Required permissions
 
 ### Account role

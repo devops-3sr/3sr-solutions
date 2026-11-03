@@ -37,6 +37,18 @@ Le script **ne fait que collecter** : il produit des données brutes (CSV et JSO
 
 Garde-fous : le script vérifie que le tenant et le compte qui se connectent sont exactement ceux que vous avez indiqués (`-TenantId`, `-User`) ; en cas d'écart, il se déconnecte et s'arrête. Avant toute connexion, il contrôle le poste (PowerShell, modules, réseau, droits d'écriture) ; si un prérequis manque, il s'arrête sans avoir tenté la moindre connexion.
 
+**À quoi servent ces données**
+
+Elles permettent à 3SR de préparer votre migration sans avoir d'accès à votre tenant :
+
+- **dimensionner les licences** de migration (comptes, boîtes, OneDrive, sites) ;
+- **évaluer les volumes** et repérer ce qui demande une attention particulière : OneDrive volumineux, boîtes partagées, salles et équipements Exchange, listes de distribution, droits sur les boîtes ;
+- **détecter les homonymes** et les doublons d'adresses (noms, prénoms, adresses et alias) avant de préparer les comptes de destination ;
+- **préparer le basculement de la messagerie** (domaines, enregistrements DNS, flux, connecteurs, règles de transport) ;
+- **vérifier les licences** disponibles dans le tenant de destination (collecte avec `-Role Target`).
+
+Le script est **idempotent** : le relancer met à jour le même dossier et la même archive, sans rien dupliquer.
+
 ## 2. Droits exigés
 
 ### Rôle du compte
