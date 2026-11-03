@@ -1,0 +1,17 @@
+# Liste blanche des GUID presents dans ce dossier (un par ligne, commentaire apres #). Controlee par tests/run-tests.ps1 et par la CI du depot.
+00000002-0000-0000-c000-000000000000  # appId de Azure Active Directory Graph (audience du jeton de preuve de possession de l'operation addKey / removeKey)
+00000002-0000-0ff1-ce00-000000000000  # appId de Office 365 Exchange Online (ressource des permissions Exchange.ManageAsApp et full_access_as_app)
+00000003-0000-0000-c000-000000000000  # appId de Microsoft Graph (application Microsoft de premiere partie)
+00000003-0000-0ff1-ce00-000000000000  # appId de Office 365 SharePoint Online (ressource de la permission Sites.FullControl.All)
+0000aaaa-0000-0000-0000-000000000001  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)
+0000aaaa-0000-0000-0000-00000000dddd  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)
+11111111-2222-3333-4444-555555555555  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)
+14d82eec-204b-4c2f-b7e8-296a70dab67e  # appId de l'application publique Microsoft "Microsoft Graph Command Line Tools" (client du flux code d'appareil)
+29232cdf-9323-42fd-ade2-1d097af3e4de  # Identifiant du modele de role d'annuaire : Exchange Administrator
+31392ffb-586c-42d1-9346-e59415a2cc4e  # Identifiant du modele de role d'annuaire : Exchange Recipient Administrator
+62e90394-69f5-4237-9190-012177145e10  # Identifiant du modele de role d'annuaire : Global Administrator (Administrateur general)
+99999999-0000-0000-0000-000000000009  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)
+99999999-8888-7777-6666-555555555555  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)
+f28a1f50-f6e7-4571-818b-6a12f2af6b6c  # Identifiant du modele de role d'annuaire : SharePoint Administrator (utilise par le faux tenant du banc ; non attribue en mode Source avec Mail et OneDrive)
+f2ef992c-3afb-46b9-b7cf-a126ee74c451  # Identifiant du modele de role d'annuaire : Global Reader (Lecteur general), utilise par le faux tenant du banc
+ffffffff-0000-0000-0000-000000000001  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)

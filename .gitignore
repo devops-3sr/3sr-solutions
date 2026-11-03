@@ -62,3 +62,7 @@ desktop.ini
 # Sorties du collecteur Cloudiway (donnees de tenant : ne jamais publier)
 collecte-resultats/
 collecte-*.zip
+
+# Sorties du connecteur Cloudiway (identifiants de tenant : ne jamais publier)
+connecteur-resultats/
+decouverte-*.json

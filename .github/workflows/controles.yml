@@ -99,6 +99,21 @@ jobs:
           Install-Module Pester -RequiredVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
           ./cloudiway/collector/tests/run-tests.ps1
 
+  connecteur:
+    name: Connecteur Cloudiway (tests)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Executer les tests hors ligne du connecteur
+        shell: pwsh
+        run: |
+          Install-Module Pester -RequiredVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          ./cloudiway/connector/tests/run-tests.ps1
+
   depot:
     name: Regles du depot
     runs-on: ubuntu-latest
