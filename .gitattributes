@@ -1,0 +1,5 @@
+# Les empreintes SHA-256 publiees doivent etre identiques sur tous les postes : aucune conversion de fins de ligne
+# pour les scripts (UTF-8 avec BOM, CRLF pour Windows PowerShell 5.1).
+*.ps1 -text
+*.cmd -text
+*.psd1 -text

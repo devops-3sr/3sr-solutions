@@ -8,14 +8,17 @@ function Add-Echec([string]$Regle, [string]$Detail) { $script:echecs.Add("[$Regl
 $fichiers = @(git ls-files)
 if ($fichiers.Count -eq 0) { throw 'Aucun fichier suivi par git.' }
 
-# 1. Scripts clients : BOM UTF-8 obligatoire (Windows PowerShell 5.1 lit sinon les accents en ANSI)
-foreach ($f in $fichiers | Where-Object { $_ -like 'ssl-managed/*.ps1' -or $_ -like 'ssl-managed/tests/*.ps1' }) {
+# Les scripts de la CI (dossier .github) ne sont pas des livrables clients.
+$livrablesPs1 = @($fichiers | Where-Object { $_ -match '\.ps1$' -and $_ -notlike '.github/*' })
+
+# 1. Scripts livres : BOM UTF-8 obligatoire (Windows PowerShell 5.1 lit sinon les accents en ANSI)
+foreach ($f in $livrablesPs1) {
     $o = [System.IO.File]::ReadAllBytes($f)
     if ($o.Length -lt 3 -or $o[0] -ne 0xEF -or $o[1] -ne 0xBB -or $o[2] -ne 0xBF) { Add-Echec 'bom' "$f n'a pas de BOM UTF-8" }
 }
 
-# 2. Noms de fichiers des scripts et guides : minuscules
-foreach ($f in $fichiers | Where-Object { $_ -match '\.ps1$' -or $_ -match '-guide-(fr|en)\.md$' }) {
+# 2. Noms de fichiers des scripts, lanceurs et guides : minuscules
+foreach ($f in $fichiers | Where-Object { $_ -match '\.(ps1|cmd)$' -or $_ -match '-guide-(fr|en)\.md$' }) {
     $nom = Split-Path $f -Leaf
     if ($nom -cmatch '[A-Z]') { Add-Echec 'minuscules' "$f : le nom doit etre en minuscules" }
 }
@@ -30,10 +33,27 @@ foreach ($f in $fichiers | Where-Object { $_ -match '-guide-en\.md$' }) {
     if ($fr -notin $fichiers) { Add-Echec 'guides' "$f n'a pas d'equivalent francais ($fr)" }
 }
 
-# 4. Identifiants GUID : uniquement ceux de la liste autorisee
-$autorises = @(Get-Content .github/allowed-guids.txt | ForEach-Object { ($_ -replace '#.*$', '').Trim().ToLowerInvariant() } | Where-Object { $_ })
+# 4. Identifiants GUID : uniquement ceux de la liste racine (.github/allowed-guids.txt) ou d'un
+#    fichier allowed-guids.txt situe dans le dossier du fichier ou dans l'un de ses parents.
+function Read-ListeGuid([string]$Chemin) {
+    @(Get-Content $Chemin | ForEach-Object { ($_ -replace '#.*$', '').Trim().ToLowerInvariant() } | Where-Object { $_ })
+}
+$listes = @{}
+foreach ($l in $fichiers | Where-Object { (Split-Path $_ -Leaf) -eq 'allowed-guids.txt' }) {
+    $dossier = if ($l -eq '.github/allowed-guids.txt') { '' } else { (Split-Path $l -Parent).Replace('\', '/') }
+    # Une liste placee dans un dossier tests/ vaut pour le dossier qui contient tests/.
+    if ($dossier -eq 'tests') { $dossier = '' }
+    elseif ($dossier -like '*/tests') { $dossier = $dossier.Substring(0, $dossier.Length - '/tests'.Length) }
+    $listes[$dossier] = @($listes[$dossier]) + (Read-ListeGuid $l)
+}
 $motifGuid = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-foreach ($f in $fichiers | Where-Object { $_ -notmatch '\.(png|jpg|jpeg|gif|pdf|zip)$' -and $_ -ne '.github/allowed-guids.txt' }) {
+foreach ($f in $fichiers | Where-Object { $_ -notmatch '\.(png|jpg|jpeg|gif|pdf|zip)$' -and (Split-Path $_ -Leaf) -ne 'allowed-guids.txt' }) {
+    $autorises = @($listes[''])
+    $parent = (Split-Path $f -Parent).Replace('\', '/')
+    while ($parent) {
+        if ($listes.ContainsKey($parent)) { $autorises += $listes[$parent] }
+        $parent = (Split-Path $parent -Parent).Replace('\', '/')
+    }
     $texte = Get-Content $f -Raw -Encoding UTF8
     if (-not $texte) { continue }
     foreach ($m in [regex]::Matches($texte, $motifGuid)) {
@@ -48,7 +68,7 @@ foreach ($f in $fichiers | Where-Object { $_ -ne '.github/scripts/controle-depot
 }
 
 # 6. Fichiers qui ne doivent jamais etre suivis
-foreach ($f in $fichiers | Where-Object { $_ -match '\.(pfx|p12|pem|key|jks|kdbx|tfstate)$' -or $_ -match '(^|/)local\.settings\.json$' -or $_ -match '(^|/)customers.*\.json$' }) {
+foreach ($f in $fichiers | Where-Object { $_ -match '\.(pfx|p12|pem|key|jks|kdbx|tfstate)$' -or $_ -match '(^|/)local\.settings\.json$' -or $_ -match '(^|/)customers.*\.json$' -or $_ -match '(^|/)collecte-resultats/' -or $_ -match '(^|/)collecte-[^/]*\.zip$' }) {
     Add-Echec 'interdit' "$f ne doit pas etre publie"
 }
 

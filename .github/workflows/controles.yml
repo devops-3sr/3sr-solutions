@@ -52,7 +52,9 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
-          $resultats = Invoke-ScriptAnalyzer -Path ssl-managed -Recurse -Settings .github/PSScriptAnalyzerSettings.psd1
+          $resultats = foreach ($dossier in 'ssl-managed', 'cloudiway') {
+            Invoke-ScriptAnalyzer -Path $dossier -Recurse -Settings .github/PSScriptAnalyzerSettings.psd1
+          }
           foreach ($r in $resultats) {
             $niveau = if ($r.Severity -eq 'Error') { 'error' } else { 'warning' }
             Write-Host ("::{0} file={1},line={2}::{3} - {4}" -f $niveau, $r.ScriptPath.Replace($PWD.Path + '\', '').Replace('\', '/'), $r.Line, $r.RuleName, $r.Message)
@@ -82,6 +84,20 @@ jobs:
         if: matrix.shell == 'powershell'
         shell: powershell
         run: ./.github/scripts/lancer-pester.ps1
+
+  collecteur:
+    name: Collecteur Cloudiway (tests)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Executer les tests hors ligne du collecteur
+        shell: pwsh
+        run: |
+          Install-Module Pester -RequiredVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          ./cloudiway/collector/tests/run-tests.ps1
 
   depot:
     name: Regles du depot
