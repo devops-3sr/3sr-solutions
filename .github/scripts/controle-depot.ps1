@@ -68,7 +68,7 @@ foreach ($f in $fichiers | Where-Object { $_ -ne '.github/scripts/controle-depot
 }
 
 # 6. Fichiers qui ne doivent jamais etre suivis
-foreach ($f in $fichiers | Where-Object { $_ -match '\.(pfx|p12|pem|key|jks|kdbx|tfstate)$' -or $_ -match '(^|/)local\.settings\.json$' -or $_ -match '(^|/)customers.*\.json$' -or $_ -match '(^|/)collecte-resultats/' -or $_ -match '(^|/)collecte-[^/]*\.zip$' }) {
+foreach ($f in $fichiers | Where-Object { $_ -match '\.(pfx|p12|pem|key|jks|kdbx|tfstate)$' -or $_ -match '(^|/)local\.settings\.json$' -or $_ -match '(^|/)customers.*\.json$' -or $_ -match '(^|/)collecte-resultats/' -or $_ -match '(^|/)collecte-[^/]*\.zip$' -or $_ -match '(^|/)connecteur-resultats/' -or $_ -match '(^|/)decouverte-[^/]*\.json$' }) {
     Add-Echec 'interdit' "$f ne doit pas etre publie"
 }
 
