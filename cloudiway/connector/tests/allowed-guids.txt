@@ -12,6 +12,7 @@
 62e90394-69f5-4237-9190-012177145e10  # Identifiant du modele de role d'annuaire : Global Administrator (Administrateur general)
 99999999-0000-0000-0000-000000000009  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)
 99999999-8888-7777-6666-555555555555  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)
-f28a1f50-f6e7-4571-818b-6a12f2af6b6c  # Identifiant du modele de role d'annuaire : SharePoint Administrator (utilise par le faux tenant du banc ; non attribue en mode Source avec Mail et OneDrive)
+f28a1f50-f6e7-4571-818b-6a12f2af6b6c  # Identifiant du modele de role d'annuaire : SharePoint Administrator (role attribue au compte de service ; modele utilise aussi par le faux tenant du banc)
 f2ef992c-3afb-46b9-b7cf-a126ee74c451  # Identifiant du modele de role d'annuaire : Global Reader (Lecteur general), utilise par le faux tenant du banc
 ffffffff-0000-0000-0000-000000000001  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)
+ffffffff-1111-2222-3333-444444444444  # GUID factice du banc de test (valeur inventee, sans correspondance reelle)

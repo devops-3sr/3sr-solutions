@@ -79,7 +79,8 @@ $code = $LASTEXITCODE
 $lines = @(Get-Content -LiteralPath $log -Encoding utf8)
 $total = @($lines | Where-Object { $_ -match '^TOTAL' } | Select-Object -Last 1)
 $failLines = @($lines | Where-Object { $_ -match '^\s*FAIL ' } | Select-Object -First 15)
-if ($code -eq 0 -and $total.Count -eq 1 -and $failLines.Count -eq 0) { Add-Result "Banc $bench" 'PASS' $total[0]; Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue }
+$skipLines = @($lines | Where-Object { $_ -match '^\s*SKIP ' } | Select-Object -First 10)
+if ($code -eq 0 -and $total.Count -eq 1 -and $failLines.Count -eq 0) { Add-Result "Banc $bench" 'PASS' $total[0]; $skipLines | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }; Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue }
 else {
     Add-Result "Banc $bench" 'FAIL' ("code $code ; " + $(if ($total.Count) { $total[0] } else { 'aucun total affiche' }))
     $failLines | ForEach-Object { Write-Host "      $_" -ForegroundColor Red }

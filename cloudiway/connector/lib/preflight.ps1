@@ -190,7 +190,7 @@ function Invoke-LocalPreflight {
     [CmdletBinding()]
     param(
         [switch]$NeedGraph,                 # connexion au tenant prevue : module Graph, hotes Microsoft, certificat
-        [switch]$NeedExchange,              # v2.2 : charges Mail / Archive -> module ExchangeOnlineManagement (avertissement, jamais bloquant)
+        [switch]$NeedExchange,              # v2.2 : Charge Mail -> module ExchangeOnlineManagement (avertissement, jamais bloquant)
         [switch]$InstallMissingModules,
         [string]$OutBase,                   # dossier de sortie (defaut : $script:Ctx.OutBase)
         [switch]$SkipCloudiway,             # pas d'appel a l'API Cloudiway : hote non teste
@@ -447,7 +447,7 @@ function Invoke-LocalPreflight {
         $rows.Add($modRow)
     }
 
-    # --- 5 bis. Module ExchangeOnlineManagement (v2.2, Mail / Archive) : jamais bloquant, l'etape Exchange devient manuelle s'il manque ---
+    # --- 5 bis. Module ExchangeOnlineManagement (v2.2, Mail) : jamais bloquant, l'etape Exchange devient manuelle s'il manque ---
     if ($NeedExchange) {
         $exoName = 'ExchangeOnlineManagement'
         $exoMin = [version]'3.0.0'
@@ -469,7 +469,7 @@ function Invoke-LocalPreflight {
         if ($null -eq $exoBad) { }
         elseif ($exoBad) {
             $exoDet = if ($exoSt.Installed) { "version $($exoSt.Installed), minimum $exoMin" } else { 'absent' }
-            $rows.Add((New-CheckRow "Module $exoName" 'WARN' "$exoDet (necessaire pour inscrire l'application dans EwsAllowedAppIDs, charges Mail / Archive)" "Le reste de la configuration continue ; l'etape Exchange (EWS) sera a faire a la main. Pour que l'outil la fasse : installer le module ($exoCmd) puis relancer, ou relancer avec -InstallMissingModules."))
+            $rows.Add((New-CheckRow "Module $exoName" 'WARN' "$exoDet (necessaire pour inscrire l'application dans EwsAllowedAppIDs, Charge Mail)" "Le reste de la configuration continue ; l'etape Exchange (EWS) sera a faire a la main. Pour que l'outil la fasse : installer le module ($exoCmd) puis relancer, ou relancer avec -InstallMissingModules."))
         } else {
             $rows.Add((New-CheckRow "Module $exoName" 'OK' "version $($exoSt.Installed)"))
         }

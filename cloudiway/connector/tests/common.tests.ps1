@@ -89,10 +89,11 @@ Describe 'Matrice des permissions (mode Source, Mail et OneDrive)' {
         $r = @(Get-RequiredEntraRoles -Mode Source -Workloads 'Mail')
         ($r | ForEach-Object Name) | Should -Contain 'Exchange Administrator'
         ($r | ForEach-Object Name) | Should -Contain 'Exchange Recipient Administrator'
-        @($r | Where-Object { $_.Target -eq 'ServiceAccount' }).Count | Should -Be 0
+        @($r | Where-Object { $_.Target -eq 'ServiceAccount' }).Count | Should -BeGreaterThan 0   # v2.7 : compte administrateur exige par Cloudiway pour Mail
     }
-    It 'Mail et OneDrive en Source : aucun compte de service' {
-        Test-NeedServiceAccount -Mode Source -Workloads 'Mail', 'OneDrive' | Should -BeFalse
+    It 'OneDrive seul en Source : aucun compte de service ; avec Mail : compte cree (v2.7)' {
+        Test-NeedServiceAccount -Mode Source -Workloads 'OneDrive' | Should -BeFalse
+        Test-NeedServiceAccount -Mode Source -Workloads 'Mail', 'OneDrive' | Should -BeTrue
     }
     It 'noms codifies' {
         $n = Get-CodedNames -Mode Source -ProjectId '12345' -TenantShort 'contoso'
@@ -103,6 +104,41 @@ Describe 'Matrice des permissions (mode Source, Mail et OneDrive)' {
     It 'produits : Mail = 5, OneDrive = 6' {
         $p = Get-ProductIds -Workloads 'Mail', 'OneDrive'
         ($p.Ids -join ',') | Should -Be '5,6'
+        $p.Unknown.Count | Should -Be 0
+    }
+}
+
+Describe 'Mode Cible, SharePoint et compte de service' {
+    It 'Source : Mail et SharePoint creent un compte de service, OneDrive non' {
+        Test-NeedServiceAccount -Mode Source -Workloads 'SharePoint' | Should -BeTrue
+        Test-NeedServiceAccount -Mode Source -Workloads 'OneDrive' | Should -BeFalse
+        Test-NeedServiceAccount -Mode Source -Workloads 'Mail' | Should -BeTrue
+    }
+    It 'Cible : Mail, OneDrive et SharePoint creent un compte de service' {
+        Test-NeedServiceAccount -Mode Target -Workloads 'OneDrive' | Should -BeTrue
+        Test-NeedServiceAccount -Mode Target -Workloads 'SharePoint' | Should -BeTrue
+        Test-NeedServiceAccount -Mode Target -Workloads 'Mail' | Should -BeTrue
+    }
+    It 'Cible : Application.ReadWrite.All et Organization.Read.All sont toujours demandees' {
+        $n = @(Get-PermissionSet -Mode Target -Workloads 'Mail' | ForEach-Object Name)
+        $n | Should -Contain 'Application.ReadWrite.All'
+        $n | Should -Contain 'Organization.Read.All'
+    }
+    It 'noms codifies en Cible' {
+        $n = Get-CodedNames -Mode Target -ProjectId '12345' -TenantShort 'fabrikam'
+        $n.App | Should -Be 'CLOUDIWAY-TARGET-P12345'
+        $n.Connector | Should -Be 'fabrikam-target'
+        $n.ServiceAccountLocal | Should -Be 'svc-ciw-target-p12345'
+        $n.CertificateSubject | Should -Be 'CN=Cloudiway-TARGET-P12345'
+    }
+    It 'produits : l''identifiant de SharePoint est inconnu (la ligne Cloudiway est bloquee tant qu''il n''est pas fourni)' {
+        $p = Get-ProductIds -Workloads 'Mail', 'SharePoint'
+        ($p.Ids -join ',') | Should -Be '5'
+        $p.Unknown | Should -Contain 'SharePoint'
+    }
+    It 'produits : -Override fournit l''identifiant de SharePoint' {
+        $p = Get-ProductIds -Workloads 'Mail', 'OneDrive', 'SharePoint' -Override 5, 6, 9
+        ($p.Ids -join ',') | Should -Be '5,6,9'
         $p.Unknown.Count | Should -Be 0
     }
 }

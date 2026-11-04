@@ -49,6 +49,13 @@ function global:New-MockOAuthError([string]$OAuthError, [string]$Description) {
     $er.ErrorDetails = [System.Management.Automation.ErrorDetails]::new((@{ error = $OAuthError; error_description = $Description } | ConvertTo-Json -Compress))
     $er
 }
+# v2.6 : jeton JWT factice (non signe) portant tid, compte (upn ou preferred_username) et expiration (secondes dans le futur) : pour -GraphAccessToken / -ExchangeAccessToken.
+function global:New-MockJwt([string]$Tid = $global:MockTenantId, [string]$Account = $global:MockUser, [int]$LifetimeSec = 3600, [switch]$NoUpn, [string]$Scp = 'Application.ReadWrite.All AppRoleAssignment.ReadWrite.All DelegatedPermissionGrant.ReadWrite.All RoleManagement.ReadWrite.Directory User.ReadWrite.All Directory.Read.All Policy.Read.All Organization.Read.All') {
+    $b64 = { param($o) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($o | ConvertTo-Json -Compress))).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
+    $claims = @{ tid = $Tid; scp = $Scp; exp = [DateTimeOffset]::UtcNow.AddSeconds($LifetimeSec).ToUnixTimeSeconds(); jti = [guid]::NewGuid().ToString('N') }
+    if ($NoUpn) { $claims['preferred_username'] = $Account } else { $claims['upn'] = $Account }
+    (& $b64 @{ alg = 'none' }) + '.' + (& $b64 $claims) + '.sig-' + [guid]::NewGuid().ToString('N')
+}
 # Copie profonde par aller-retour JSON : le script ne doit jamais tenir de reference vers l'etat interne du faux tenant.
 function global:Copy-Mock($Object) {
     if ($null -eq $Object) { return $null }
@@ -78,6 +85,7 @@ function global:Reset-MockState {
         ConnectFails      = $false
         Forbid            = @()           # @{ Method; Pattern } : 403 ciblé (regex sur le chemin)
         Throttle          = @()           # @{ Method; Pattern; Times } : 429 les N premieres fois puis succes
+        SecretReadLag     = 0             # v2.6 : le secret client ajoute n'apparait qu'apres N lectures de l'application (propagation)
         Replication404    = 0             # POST /servicePrincipals : 404 les N premieres fois (propagation Entra)
         ConditionalAccess = 'mfa-all'     # 'mfa-all' | 'none'
         ModuleMissing     = $false        # Microsoft.Graph.Authentication absent du poste
@@ -108,6 +116,8 @@ function global:Reset-MockState {
         ExoTenantId       = $null         # v2.2 : tenant reellement obtenu par Connect-ExchangeOnline (defaut : celui du faux tenant)
         ExoReadFails      = $false        # v2.2 : Get-OrganizationConfig echoue
         ExoSetFails       = $false        # v2.2 : Set-OrganizationConfig echoue
+        ExoPreSession     = $null         # v2.5 : session Exchange Online DEJA ouverte dans la console @{ TenantID; UserPrincipalName } (autre tenant ou meme tenant)
+        ForbidPasswordReset = $false      # v2.5 : PATCH /users/{id} avec passwordProfile refuse en 403 (compte qui detient un role d'administrateur)
         EwsEnabled        = $true         # v2.2 : EwsEnabled de l'organisation ($true | $false | $null)
         EwsList           = @('0000aaaa-0000-0000-0000-000000000001')   # v2.2 : EwsAllowedAppIDs de l'organisation (une autre application deja inscrite par defaut ; @() pour tester la liste vide)
         ExoOnSet          = $null         # v2.2 : scriptblock { param($Hash) } appele avant chaque Set-OrganizationConfig
@@ -221,6 +231,7 @@ function global:Invoke-MgGraphRequest {
     $thr = Test-MockPattern $global:MockOpts.Throttle $Method $path
     if ($thr -and $thr.Times -gt 0) { $thr.Times--; Add-MockCall 'Graph' $Method $path '429' $isWrite $bodyTxt; throw (New-MockError 429 'TooManyRequests' 'Too many requests.') }
     if (Test-MockPattern $global:MockOpts.ForbidPolicy $Method $path) { Add-MockCall 'Graph' $Method $path '403' $isWrite $bodyTxt; throw (New-MockError 403 'Authorization_RequestDenied' 'The requested operation is not allowed as per assigned policy.') }
+    if ($global:MockOpts.ForbidPasswordReset -and $Method -eq 'PATCH' -and $path -like '/users/*' -and $bodyTxt -match 'passwordProfile') { Add-MockCall 'Graph' $Method $path '403' $isWrite $bodyTxt; throw (New-MockError 403 'Authorization_RequestDenied' 'Insufficient privileges to complete the operation.') }
     if (Test-MockPattern $global:MockOpts.Forbid $Method $path) { Add-MockCall 'Graph' $Method $path '403' $isWrite $bodyTxt; throw (New-MockError 403 'Authorization_RequestDenied' 'Insufficient privileges to complete the operation.') }
     $gf = Test-MockPattern $global:MockOpts.GraphFail $Method $path
     if ($gf -and $gf.Query -and $q -notmatch $gf.Query) { $gf = $null }   # Query (regex facultative) : cible un GET precis par son $select
@@ -268,7 +279,12 @@ function global:Invoke-MgGraphRequest {
             '^/applications/([^/]+)$' {
                 $id = $Matches[1]; $a = @($T.Apps | Where-Object { $_.id -eq $id })[0]
                 if (-not $a) { & $notFound "Resource '$id' does not exist or one of its queried reference-property objects are not present." }
-                & $ok; return (Copy-Mock $a)
+                & $ok
+                if ($T.SecretLagLeft -gt 0 -and $T.SecretLagId) {
+                    $T.SecretLagLeft--
+                    $c = Copy-Mock $a; $c.passwordCredentials = @(@($c.passwordCredentials) | Where-Object { "$($_.keyId)" -ne $T.SecretLagId }); return $c
+                }
+                return (Copy-Mock $a)
             }
             '^/users$' {
                 & $ok; $n = & $filterVal "userPrincipalName eq '((?:[^']|'')+)'"
@@ -309,6 +325,7 @@ function global:Invoke-MgGraphRequest {
                 if (-not $b.passwordCredential.endDateTime) { & $bad 'passwordCredential.endDateTime requis.' }
                 $kid = [guid]::NewGuid().ToString(); $txt = 'MockSecret~' + [guid]::NewGuid().ToString('N') + '_Zz9'
                 $T.Secrets[$kid] = $txt
+                if ([int]$global:MockOpts.SecretReadLag -gt 0) { $T.SecretLagId = $kid; $T.SecretLagLeft = [int]$global:MockOpts.SecretReadLag }
                 $pc = @{ keyId = $kid; displayName = $b.passwordCredential.displayName; startDateTime = (Microsoft.PowerShell.Utility\Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); endDateTime = $b.passwordCredential.endDateTime; hint = $txt.Substring(0, 3) }
                 $a.passwordCredentials = @(@($a.passwordCredentials) + $pc)
                 & $ok; $r = Copy-Mock $pc; $r | Add-Member -NotePropertyName secretText -NotePropertyValue $txt -Force; return $r
@@ -365,6 +382,7 @@ function global:Invoke-MgGraphRequest {
                 # Graph : retire UN secret client par son keyId ; 400 si le keyId est inconnu de l'application
                 $id = $Matches[1]; $a = @($T.Apps | Where-Object { $_.id -eq $id })[0]
                 if (-not $a) { & $notFound "application $id inconnue" }
+                if ($global:MockOpts.RemovePasswordForbidden) { Add-MockCall 'Graph' $Method $path '403' $isWrite $bodyTxt; throw (New-MockError 403 'Authorization_RequestDenied' 'Insufficient privileges to complete the operation.') }
                 if (-not $b.keyId) { & $bad 'keyId requis.' }
                 $pc = @($a.passwordCredentials | Where-Object { $_.keyId -eq $b.keyId })[0]
                 if (-not $pc) { & $bad "No password credential found with keyId $($b.keyId)." }
@@ -497,6 +515,12 @@ function global:Connect-MgGraph {
     if ($global:MockOpts.ConnectFails) { throw 'MOCK: connexion refusee par l''utilisateur.' }
     $tid = if ($global:MockOpts.ConnectTenantId) { $global:MockOpts.ConnectTenantId } else { $TenantId }
     $acc = if ($global:MockOpts.ConnectAccount) { $global:MockOpts.ConnectAccount } else { $global:MockUser }
+    if ($AccessToken -and -not $TenantId) {
+        # jeton fourni : le contexte reflete les revendications du jeton (tid, compte)
+        $tp = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($AccessToken))
+        $cl = ConvertFrom-JwtPayload $tp; $tp = $null
+        if ($cl) { $tid = "$($cl.tid)"; $acc = Get-JwtAccount $cl }
+    }
     $global:MockGraphExpired = $false   # nouvelle connexion = nouveau jeton
     $global:MockMgCtx = [pscustomobject]@{ TenantId = $tid; Account = $acc; Scopes = @($Scopes); ContextScope = $ContextScope }
 }
@@ -509,18 +533,26 @@ function global:Disconnect-MgGraph { [CmdletBinding()] param() Add-MockCall 'Cmd
 $global:MockExoCtx = $null
 function global:Connect-ExchangeOnline {
     [CmdletBinding()]
-    param([string]$UserPrincipalName, [switch]$ShowBanner, [switch]$Device)
-    Add-MockCall 'Cmd' 'CONNECT-EXO' 'Connect-ExchangeOnline' 'OK' $false ("upn=$UserPrincipalName" + $(if ($Device) { ' device=1' } else { '' }))
+    param([string]$UserPrincipalName, [switch]$ShowBanner, [switch]$Device, [string]$AccessToken, [string]$Organization)
+    # v2.6 : le jeton n'est JAMAIS enregistre (seulement sa presence et l'organisation) ; il doit etre un jeton Exchange du faux tenant (3 segments).
+    Add-MockCall 'Cmd' 'CONNECT-EXO' 'Connect-ExchangeOnline' 'OK' $false ("upn=$UserPrincipalName" + $(if ($Device) { ' device=1' } else { '' }) + $(if ($AccessToken) { " accesstoken=1 org=$Organization" } else { '' }))
+    if ($AccessToken -and (@($AccessToken -split '\.').Count -ne 3 -or -not $Organization)) { throw 'MOCK: jeton Exchange ou -Organization invalide.' }
     if ($global:MockOpts.ExoConnectFails) { throw $global:MockOpts.ExoConnectMessage }
     $tid = if ($global:MockOpts.ExoTenantId) { $global:MockOpts.ExoTenantId } else { $global:MockTenantId }
     $global:MockExoCtx = [pscustomobject]@{ TenantID = $tid; UserPrincipalName = $UserPrincipalName }
 }
-function global:Get-ConnectionInformation { [CmdletBinding()] param() if ($global:MockExoCtx) { $global:MockExoCtx } }
+function global:Get-ConnectionInformation {
+    [CmdletBinding()]
+    param()
+    Add-MockCall 'Cmd' 'GET-CONNINFO' 'Get-ConnectionInformation'
+    if ($global:MockExoCtx) { $global:MockExoCtx }
+    elseif ($global:MockOpts.ExoPreSession) { [pscustomobject]@{ TenantID = $global:MockOpts.ExoPreSession.TenantID; UserPrincipalName = $global:MockOpts.ExoPreSession.UserPrincipalName; State = 'Connected' } }
+}
 function global:Disconnect-ExchangeOnline { [CmdletBinding(SupportsShouldProcess)] param() Add-MockCall 'Cmd' 'DISCONNECT-EXO' 'Disconnect-ExchangeOnline'; $global:MockExoCtx = $null }
 function global:Get-OrganizationConfig {
     [CmdletBinding()]
     param()
-    if ($null -eq $global:MockExoCtx) { Add-MockCall 'Exo' 'GET' 'Get-OrganizationConfig' 'NON-CONNECTE'; throw 'MOCK: pas de session Exchange Online.' }
+    if ($null -eq $global:MockExoCtx -and -not $global:MockOpts.ExoPreSession) { Add-MockCall 'Exo' 'GET' 'Get-OrganizationConfig' 'NON-CONNECTE'; throw 'MOCK: pas de session Exchange Online.' }
     if ($global:MockOpts.ExoReadFails) { Add-MockCall 'Exo' 'GET' 'Get-OrganizationConfig' 'ECHEC'; throw 'MOCK: Get-OrganizationConfig refuse (droits insuffisants).' }
     Add-MockCall 'Exo' 'GET' 'Get-OrganizationConfig'
     [pscustomobject]@{ EwsEnabled = $global:MockOpts.EwsEnabled; EwsAllowedAppIDs = @($global:MockOpts.EwsList); EwsApplicationAccessPolicy = $null; EwsAllowList = $null; EwsBlockList = $null }
@@ -536,7 +568,7 @@ function global:Set-OrganizationConfig {
     $added = @($new | Where-Object { $n = $_; @($prior | Where-Object { $_ -ieq $n }).Count -eq 0 })
     $bodyTxt = if ($removed.Count -gt 0) { 'REMOVE=' + ($removed -join ',') } else { 'Add=' + ($added -join ',') }
     Add-MockCall 'Exo' 'SET' 'Set-OrganizationConfig' $(if ($global:MockOpts.ExoSetFails) { 'ECHEC' } else { 'OK' }) $true $bodyTxt
-    if ($null -eq $global:MockExoCtx) { throw 'MOCK: pas de session Exchange Online.' }
+    if ($null -eq $global:MockExoCtx -and -not $global:MockOpts.ExoPreSession) { throw 'MOCK: pas de session Exchange Online.' }
     if ($global:MockOpts.ExoOnSet) { & $global:MockOpts.ExoOnSet $EwsAllowedAppIDs }
     if ($global:MockOpts.ExoSetFails) { throw 'MOCK: Set-OrganizationConfig refuse (droits insuffisants).' }
     if ($new.Count -eq 0 -or $notGuid.Count -gt 0) { throw "||Invalid value provided for parameter EwsAllowedAppIDs '$EwsAllowedAppIDs'. Please provide comma separated values of valid GUIDs." }

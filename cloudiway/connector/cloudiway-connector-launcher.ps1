@@ -18,8 +18,8 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $AppName    = '3SR - Configuration du connecteur Cloudiway'
-$AppVersion = '2.4'
-$AppDate    = '31/10/2026'
+$AppVersion = '2.6'
+$AppDate    = '03/11/2026'
 $AppContact = 'votre contact 3SR'
 $MinVersion = [version]'7.2'
 $MainScript = Join-Path $PSScriptRoot 'cloudiway-connector.ps1'

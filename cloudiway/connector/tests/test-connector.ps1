@@ -1,7 +1,7 @@
 ﻿#Requires -Version 7.2
 <#
 .SYNOPSIS
-    Banc de test HORS LIGNE de CloudiwayConnector (mode Source, Mail et OneDrive) : le VRAI script principal cloudiway-connector.ps1 et les VRAIS modules lib\*.ps1
+    Banc de test HORS LIGNE de CloudiwayConnector (modes Source et Cible, Mail, OneDrive et SharePoint) : le VRAI script principal cloudiway-connector.ps1 et les VRAIS modules lib\*.ps1
     contre un FAUX tenant Microsoft 365 en memoire et un FAUX portail Cloudiway (tests\mocks.ps1). Aucune connexion, aucun appel reseau.
 .DESCRIPTION
     Usage : pwsh -NoProfile -File tests\test-connector.ps1 [-KeepOutput]
@@ -60,15 +60,17 @@ function Skip([string]$Point, [string]$Name, [string]$Why) { $Results.Add([pscus
 # Constantes (noms codifies v2)
 # ---------------------------------------------------------------------------------------------------
 $PatSecure = New-TestSecure $global:MockPat
-$AppSrc = 'CLOUDIWAY-SOURCE-P12345'
-$ConnSrc = 'contoso-source'
+$AppSrc = 'CLOUDIWAY-SOURCE-P12345'; $AppTgt = 'CLOUDIWAY-TARGET-P12345'
+$SvcSrc = 'svc-ciw-source-p12345@contoso.onmicrosoft.com'; $SvcTgt = 'svc-ciw-target-p12345@contoso.onmicrosoft.com'
+$ConnSrc = 'contoso-source'; $ConnTgt = 'contoso-target'
 $tempDir = [System.IO.Path]::GetTempPath()
 
 function New-Base([string]$Tag) { $d = Join-Path $tmpRoot $Tag; New-Item -ItemType Directory -Path $d -Force | Out-Null; $d }
 
 # Appel v2 : -Mode -Tenant <domaine> -Admin365 -Cloudiway <email> ; mot de passe Cloudiway saisi par Read-Host (file de reponses)
 function Get-BaseParams([string]$Base, [string[]]$Workloads = @('Mail', 'OneDrive'), [string]$Mode = 'Source') {
-    @{ Mode = $Mode; Tenant = 'contoso.onmicrosoft.com'; Admin365 = $global:MockUser; Cloudiway = $global:MockCwLogin; Workloads = $Workloads; Yes = $true; OutDir = $Base }
+    # v2.6 : le defaut du script est Both ; le banc historique (503 tests ecrits pour le certificat seul) passe explicitement -AuthMethod Certificate. Les tests Both ont leur point 34.
+    @{ Mode = $Mode; Tenant = 'contoso.onmicrosoft.com'; Admin365 = $global:MockUser; Cloudiway = $global:MockCwLogin; Workloads = $Workloads; Yes = $true; OutDir = $Base; AuthMethod = 'Certificate' }
 }
 # Variante PAT : -CloudiwayPat (SecureString) a la place de -Cloudiway
 function Use-Pat([hashtable]$P) { $P.Remove('Cloudiway'); $P['CloudiwayPat'] = $PatSecure; $P }
@@ -242,13 +244,14 @@ function Set-MockKeyEnd($App, [string]$Thumb, [int]$Days) {
 # Oracles (ecrits a la main, independants de lib\permissions.ps1)
 $expSrcMailOd = @(P Graph 'MailboxSettings.ReadWrite', 'User.Read.All', 'Files.ReadWrite.All', 'Sites.FullControl.All', 'Directory.Read.All') +
 @(P Exchange 'Exchange.ManageAsApp', 'full_access_as_app') + @(P SharePoint 'Sites.FullControl.All', 'User.Read.All') + @(P Graph 'User.Read' 'Delegated')
+$expSrcMailOdSp = $expSrcMailOd + @(P Graph 'Group.Read.All')
 
 # ===================================================================================================
-# SCENARIO A : points 1, 2, 10, 11, 16, 17, 18 (Source Mail + OneDrive, certificat par defaut, passages successifs)
+# SCENARIO A : points 1, 2, 10, 11, 16, 17, 18 (Source Mail + OneDrive + SharePoint, certificat par defaut, passages successifs)
 # ===================================================================================================
 Reset-MockState
 $baseA = New-Base 'A'; $allBases.Add($baseA)
-$pA = Get-BaseParams $baseA @('Mail', 'OneDrive'); $pA['ProductIds'] = '5,6'
+$pA = Get-BaseParams $baseA @('Mail', 'OneDrive', 'SharePoint'); $pA['ProductIds'] = '5,6,7'
 
 $r1 = Invoke-Connector $pA $baseA
 $app = @(Get-MockApp $AppSrc)[0]; $sp = Get-MockSp $AppSrc; $svc = Get-MockUser $SvcSrc
@@ -256,18 +259,19 @@ $conn = Get-MockConnector $ConnSrc; $cs = Get-Settings $conn; $cert1 = Get-ConnC
 T 1 'pas de crash' ([string]::IsNullOrEmpty($r1.Crash)) $r1.Crash
 T 1 'code de sortie 0' ($r1.Exit -eq 0) "exit=$($r1.Exit)"
 T 1 'application CLOUDIWAY-SOURCE-P12345 creee, etiquetee CloudiwayConnector, locataire unique' ($app -and @($app.tags) -contains 'CloudiwayConnector' -and $app.signInAudience -eq 'AzureADMyOrg') "app=$($app.displayName) tags=$(@($app.tags) -join ',')"
-T 1 'client public NON active (aucun compte de service necessaire)' ($app -and $app.isFallbackPublicClient -ne $true)
+T 1 'client public active (compte de service necessaire)' ($app -and $app.isFallbackPublicClient -eq $true)
 T 1 'principal de service cree' ([bool]$sp)
-$cmp = Compare-Sets (Get-MockAppPerms $app) $expSrcMailOd
-T 1 'permissions declarees = matrice Source (Mail+OneDrive)' $cmp.Equal $cmp.Text
+$cmp = Compare-Sets (Get-MockAppPerms $app) $expSrcMailOdSp
+T 1 'permissions declarees = matrice Source (Mail+OneDrive+SharePoint)' $cmp.Equal $cmp.Text
 $gaps = Get-ConsentGaps $AppSrc
 T 1 'consentement accorde (roles + portees)' ($gaps.Count -eq 0) ($gaps -join '; ')
 T 1 'roles Entra du principal de service (Exchange Admin + Recipient Admin)' ($sp -and (Test-MockRole $sp.id $global:MockRoleTpl.ExA) -and (Test-MockRole $sp.id $global:MockRoleTpl.ExRA)) 'roles Exchange absents'
 T 1 'certificat dans keyCredentials (1), aucun secret client (AuthMethod Certificate par defaut)' ($app -and @($app.keyCredentials).Count -eq 1 -and @($app.passwordCredentials).Count -eq 0) "certs=$(@($app.keyCredentials).Count) secrets=$(@($app.passwordCredentials).Count)"
-T 1 'AUCUN compte de service cree (Mail et OneDrive en Source)' (-not $svc -and @($global:MockTenant.Users | Where-Object { $_.userPrincipalName -like 'svc-*' }).Count -eq 0 -and @($r1.Calls | Where-Object { $_.Method -eq 'POST' -and $_.Path -eq '/users' }).Count -eq 0) 'compte de service cree'
-T 1 'connecteur cree dans Cloudiway (nom, sens, produits)' ($conn -and $conn.isTarget -eq $false -and $conn.rawProductList -eq '[5,6]') "connecteur=$($conn.name) produits=$($conn.rawProductList)"
-T 1 'connecteur : RestClientId = AppId, domaine, aucun compte de migration, region 1, authentification 3' ($cs -and $cs.RestClientId -eq $app.appId -and @($cs.Domains) -contains 'contoso.onmicrosoft.com' -and -not $cs.MigrationAccount -and $cs.ServerRegion -eq 1 -and $cs.AuthenticationType -eq 3 -and $cs.TenantName -eq 'contoso') "settings=$($conn.rawSettings -replace '"MigrationAccountPassword":"[^"]*"','"MigrationAccountPassword":"***"')"
-T 1 'connecteur : aucun mot de passe de compte, jamais RestClientSecret en mode Certificate' ($cs -and -not $cs.MigrationAccountPassword -and -not $cs.RestClientSecret) 'secret inattendu dans le connecteur'
+T 1 'compte de service cree (UPN codifie, etiquette, expiration desactivee, sans licence)' ($svc -and $svc.employeeType -eq 'CloudiwayConnector' -and $svc.passwordPolicies -match 'DisablePasswordExpiration' -and @($svc.assignedLicenses).Count -eq 0) "svc=$($svc.userPrincipalName)"
+T 1 'role SharePoint Administrator sur le compte de service' ($svc -and (Test-MockRole $svc.id $global:MockRoleTpl.SPA)) 'role SPA absent'
+T 1 'connecteur cree dans Cloudiway (nom, sens, produits)' ($conn -and $conn.isTarget -eq $false -and $conn.rawProductList -eq '[5,6,7]') "connecteur=$($conn.name) produits=$($conn.rawProductList)"
+T 1 'connecteur : RestClientId = AppId, domaine, compte de service, region 1, authentification 3' ($cs -and $cs.RestClientId -eq $app.appId -and @($cs.Domains) -contains 'contoso.onmicrosoft.com' -and $cs.MigrationAccount -eq $SvcSrc -and $cs.ServerRegion -eq 1 -and $cs.AuthenticationType -eq 3 -and $cs.TenantName -eq 'contoso') "settings=$($conn.rawSettings -replace '"MigrationAccountPassword":"[^"]*"','"MigrationAccountPassword":"***"')"
+T 1 'connecteur : mot de passe du compte de service transmis (= celui du tenant), jamais RestClientSecret en mode Certificate' ($cs -and $svc -and $cs.MigrationAccountPassword -eq $svc.PwdMarker -and -not $cs.RestClientSecret) 'MigrationAccountPassword absent ou different'
 T 1 'certificat envoye en Base64 : PFX ouvrable avec connectorCertificate.secret, cle privee, empreinte = keyCredentials, sujet codifie' ($cert1 -and $cert1.HasKey -and ((Get-MockThumbs $app) -contains $cert1.Thumbprint) -and $cert1.Subject -eq 'CN=Cloudiway-SOURCE-P12345') "cert=$($cert1.Thumbprint) subject=$($cert1.Subject)"
 $certB1 = if ($conn -and $conn._body) { $conn._body.connectorCertificate } else { $null }
 T 1 'connectorCertificate : fileName *.pfx, connectorId, pas de chemin local' ($certB1 -and $certB1.fileName -like '*.pfx' -and "$($certB1.certificateFile)" -notmatch '^[A-Za-z]:[\\/]|\.pfx$' -and $global:MockCiw.CertFileSeen -eq $null) "fileName=$($certB1.fileName)"
@@ -275,8 +279,8 @@ T 1 'marqueur de suivi = fileName du certificat CIW1_<32 hex de l''empreinte>_<A
 
 # --- Point 16 : noms codifies, projet detecte ---
 $cmdl = @($r1.Calls | Where-Object { $_.Kind -eq 'Ciw' -and $_.Path -eq '/Projects' }).Count
-T 16 'projet detecte automatiquement (un seul projet visible, aucun -ProjectId) : objets nommes P12345' ($app -and $conn -and $cmdl -ge 1) "GET /Projects=$cmdl"
-T 16 'noms codifies : application, connecteur (<prefixe du domaine>-source)' ($app.displayName -eq $AppSrc -and $conn.name -eq $ConnSrc) "app=$($app.displayName) conn=$($conn.name)"
+T 16 'projet detecte automatiquement (un seul projet visible, aucun -ProjectId) : objets nommes P12345' ($app -and $svc -and $conn -and $cmdl -ge 1) "GET /Projects=$cmdl"
+T 16 'noms codifies : application, compte de service, connecteur (<prefixe du domaine>-source)' ($app.displayName -eq $AppSrc -and $svc.userPrincipalName -eq $SvcSrc -and $svc.displayName -eq 'Cloudiway Source P12345' -and $conn.name -eq $ConnSrc) "app=$($app.displayName) svc=$($svc.userPrincipalName) conn=$($conn.name)"
 T 16 'aucune URI de redirection (reservee a une charge non disponible dans cette version)' ($app -and @($app.web.redirectUris).Count -eq 0) "uri=$(@($app.web.redirectUris) -join ',')"
 T 16 'domaine resolu en GUID par la metadonnee OIDC publique (1 appel, sans authentification)' (@($r1.Calls | Where-Object { $_.Kind -eq 'Oidc' }).Count -eq 1 -and $r1.Console -match [regex]::Escape($global:MockTenantId)) "oidc=$(@($r1.Calls | Where-Object { $_.Kind -eq 'Oidc' }).Count)"
 T 16 'ordre : connexion Cloudiway AVANT Connect-MgGraph, connecteur existant lu avant toute ecriture Graph' ((($r1.Calls | Where-Object { $_.Kind -eq 'Ciw' } | Select-Object -First 1).Seq) -lt (($r1.Calls | Where-Object { $_.Method -eq 'CONNECT' } | Select-Object -First 1).Seq) -and (($r1.Calls | Where-Object { $_.Kind -eq 'Ciw' -and $_.Path -match '^/Connectors' } | Select-Object -First 1).Seq) -lt (($r1.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.IsWrite } | Select-Object -First 1).Seq)) 'ordre inattendu'
@@ -301,7 +305,7 @@ T 2 'un seul certificat toujours present, aucun identifiant regenere' (@(@(Get-M
 
 # --- Point 10 : rotation (alias -RotateCertificate) ---
 $oldKeyIds = @((@(Get-MockApp $AppSrc)[0]).keyCredentials | ForEach-Object { "$($_.keyId)" })
-$oldThumbs = @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])); $putBefore = $global:MockCiw.PutCount; 
+$oldThumbs = @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])); $putBefore = $global:MockCiw.PutCount; $pwBefore = (Get-MockUser $SvcSrc).PwdMarker
 $pRot = $pA.Clone(); $pRot['RotateCertificate'] = $true
 $r10 = Invoke-Connector $pRot $baseA
 $appAfter = @(Get-MockApp $AppSrc)[0]; $newThumbs = @(Get-MockThumbs $appAfter); $connAfter = Get-MockConnector $ConnSrc; $certAfter = Get-ConnCert $connAfter
@@ -309,6 +313,7 @@ T 10 'pas de crash, code de sortie 0' ([string]::IsNullOrEmpty($r10.Crash) -and 
 T 10 'nouveau certificat ajoute puis ancien retire : UN SEUL certificat actif' ($newThumbs.Count -eq 1 -and $newThumbs[0] -notin $oldThumbs) "n=$($newThumbs.Count)"
 T 10 'ancien certificat de l''outil RETIRE apres transmission du nouveau (1 cle retiree, celle de l''ancien keyId)' (($oldThumbs | Where-Object { $_ -in $newThumbs }).Count -eq 0 -and $global:MockTenant.RemovedKeys -eq 1 -and $global:MockTenant.RemovedKeyIds -contains $oldKeyIds[0]) "anciens=$($oldThumbs -join ',') apres=$($newThumbs -join ',') retirees=$($global:MockTenant.RemovedKeys)"
 T 10 'connecteur MIS A JOUR (PUT) avec le NOUVEAU certificat (Base64 + mot de passe) et un nouveau marqueur' ($global:MockCiw.PutCount -gt $putBefore -and $certAfter -and $certAfter.Thumbprint -ne $cert1.Thumbprint -and ($newThumbs -contains $certAfter.Thumbprint)) "PUT=$($global:MockCiw.PutCount - $putBefore) cert=$($certAfter.Thumbprint)"
+T 10 'rotation : mot de passe du compte de service etiquete reinitialise ET renvoye au connecteur (coherents)' ((Get-MockUser $SvcSrc).PwdMarker -ne $pwBefore -and (Test-ConnCoherence $ConnSrc $AppSrc $SvcSrc) -eq '') "incoherence : $(Test-ConnCoherence $ConnSrc $AppSrc $SvcSrc)"
 T 10 'rotation : aucun fichier ecrit' ((Get-ExtraFiles $r10).Count -eq 0) "en trop : $((Get-ExtraFiles $r10) -join ', ')"
 
 # --- Point 18 : renouvellement automatique (marqueur absent, empreinte inconnue, < 30 jours) ---
@@ -317,7 +322,7 @@ function Test-Renewal([string]$Label, [scriptblock]$Break) {
     & $Break
     $rr = Invoke-Connector (Keep $pA) $baseA
     $a2 = @(Get-MockApp $AppSrc)[0]; $nAfter = @(Get-MockThumbs $a2).Count; $c1 = Get-MockConnector $ConnSrc; $newC = Get-ConnCert $c1
-    $coh = Test-ConnCoherence $ConnSrc $AppSrc
+    $coh = Test-ConnCoherence $ConnSrc $AppSrc $SvcSrc
     T 18 "$Label : renouvellement automatique (exit 0, 1 seul certificat apres, ancien retire, PUT, nouveau marqueur CIW1 coherent)" ($rr.Exit -eq 0 -and $nAfter -eq 1 -and $global:MockCiw.PutCount -eq $put0 + 1 -and $newC -and $newC.Thumbprint -ne $oldC.Thumbprint -and $coh -eq '' -and $global:MockTenant.RemovedKeys -eq $rk0 + 1) "exit=$($rr.Exit) certs=$nBefore->$nAfter PUT=$($global:MockCiw.PutCount - $put0) retirees=$($global:MockTenant.RemovedKeys - $rk0) incoherence=$coh $($rr.Crash)"
     $rr
 }
@@ -344,6 +349,40 @@ T 3 'plan affiche (CREER + Total)' ($r3.Console -match 'CREER' -and $r3.Console 
 T 3 'rien cree dans le tenant ni le portail' ((@($global:MockTenant.Apps).Count -eq 0) -and (@($global:MockTenant.Users).Count -eq 0) -and (@($global:MockCiw.Connectors).Count -eq 0)) 'objets crees en simulation'
 T 3 'aucun fichier hors run.log / Rapport, aucun PFX temporaire' ((Get-ExtraFiles $r3).Count -eq 0 -and $r3.NewTempPfx.Count -eq 0) 'fichier sensible ecrit en simulation'
 T 3 'rapport marque SIMULATION' ((Read-RunFile $r3 'Rapport-*.md') -match 'SIMULATION') 'rapport sans mention de simulation'
+
+# ===================================================================================================
+# POINT 4 : Cible
+# ===================================================================================================
+Reset-MockState
+$base4 = New-Base 'P4'; $allBases.Add($base4)
+$p4 = Get-BaseParams $base4 @('Mail', 'OneDrive') 'Target'
+$r4 = Invoke-Connector $p4 $base4
+$app4 = @(Get-MockApp $AppTgt)[0]
+$tgtGraphApp = 'MailboxSettings.ReadWrite', 'User.Read.All', 'Files.ReadWrite.All', 'Sites.FullControl.All', 'InformationProtectionPolicy.Read.All', 'Group.ReadWrite.All', 'Directory.Read.All', 'Application.ReadWrite.All', 'Organization.Read.All'
+# Decision de conception : en Cible, seule User.Read est demandee en delegue ; les permissions Cible restent en Application.
+$expTgt = @(P Graph $tgtGraphApp) + @(P Exchange 'full_access_as_app', 'Exchange.ManageAsApp') + @(P SharePoint 'Sites.FullControl.All', 'User.ReadWrite.All') + @(P Graph 'User.Read' 'Delegated')
+$cmp4 = Compare-Sets (Get-MockAppPerms $app4) $expTgt
+T 4 'pas de crash, code de sortie 0' ([string]::IsNullOrEmpty($r4.Crash) -and $r4.Exit -eq 0) "exit=$($r4.Exit) $($r4.Crash)"
+T 4 'application CLOUDIWAY-TARGET-P12345, compte svc-ciw-target-p12345 (OneDrive Cible exige un compte de service)' ($app4 -and (Get-MockUser $SvcTgt)) 'noms Cible'
+T 4 'permissions Cible = Application (matrice) + User.Read en delegue uniquement' $cmp4.Equal $cmp4.Text
+$perms4 = Get-MockAppPerms $app4
+T 4 'Group.ReadWrite.All present en Application, et AUCUNE portee deleguee large' (($perms4 -contains 'Graph|Group.ReadWrite.All|Application') -and (@($perms4 | Where-Object { $_ -like '*|Delegated' }).Count -eq 1) -and ($perms4 -contains 'Graph|User.Read|Delegated')) "deleguees=$(@($perms4 | Where-Object { $_ -like '*|Delegated' }) -join ',')"
+T 4 'toujours-cible : Application.ReadWrite.All + Organization.Read.All' (($perms4 -contains 'Graph|Application.ReadWrite.All|Application') -and ($perms4 -contains 'Graph|Organization.Read.All|Application')) 'permissions inter-tenant absentes'
+T 4 'aucune portee deleguee Exchange/SharePoint demandee' (@($perms4 | Where-Object { $_ -match '^(Exchange|SharePoint)\|.*\|Delegated$' }).Count -eq 0) 'portee deleguee inattendue'
+T 4 'consentement delegue AllPrincipals limite a User.Read (aucune portee large)' (@($global:MockTenant.Grants | Where-Object { $_.consentType -eq 'AllPrincipals' -and ("$($_.scope)" -split '\s+' | Where-Object { $_ -and $_ -ne 'User.Read' }) }).Count -eq 0) 'octroi delegue large'
+T 4 'compte de service necessaire : isFallbackPublicClient active ; Cible : aucune URI de redirection' ($app4 -and $app4.isFallbackPublicClient -eq $true -and @($app4.web.redirectUris).Count -eq 0) "uri=$(@($app4.web.redirectUris) -join ',')"
+$gaps4 = Get-ConsentGaps $AppTgt
+T 4 'consentement complet (roles + portees deleguees)' ($gaps4.Count -eq 0) ($gaps4 -join '; ')
+$c4 = Get-MockConnector $ConnTgt
+T 4 'connecteur Cible cree (isTarget=true, nom contoso-target, certificat coherent)' ($c4 -and $c4.isTarget -eq $true -and (Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) -eq '') "incoherence : $(Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt)"
+$r4b = Invoke-Connector (Keep $p4) $base4
+T 4 'second passage Cible : exit 0, zero ecriture Graph et Cloudiway' ($r4b.Exit -eq 0 -and $r4b.GraphWrites -eq 0 -and $r4b.CiwWrites -eq 0) "exit=$($r4b.Exit) graph=$($r4b.GraphWrites) ciw=$($r4b.CiwWrites) $(Get-WriteBrief $r4b.Calls)"
+# SharePoint en Cible : aucune URI de redirection
+Reset-MockState
+$base4t = New-Base 'P4t'; $allBases.Add($base4t)
+$p4t = Get-BaseParams $base4t @('Mail', 'SharePoint') 'Target'; $p4t['ProductIds'] = '5,7'
+$r4t = Invoke-Connector $p4t $base4t
+T 4 'SharePoint en Cible : exit 0, aucune URI de redirection Cloudiway' ($r4t.Exit -eq 0 -and @(@(Get-MockApp $AppTgt)[0].web.redirectUris).Count -eq 0) "exit=$($r4t.Exit) uri=$(@(@(Get-MockApp $AppTgt)[0].web.redirectUris) -join ',')"
 
 # ===================================================================================================
 # POINT 5 : utilisateur NON Global Administrator
@@ -470,6 +509,32 @@ $r23f = Invoke-Connector $p23 $base23
 T 23 '-Tenant = domaine verifie personnalise : resolu, noms codifies sur le domaine .onmicrosoft.com par defaut, exit 0' ($r23f.Exit -eq 0 -and (Get-MockConnector $ConnSrc) -and (Get-MockApp $AppSrc)) "exit=$($r23f.Exit) $($r23f.Crash)"
 
 # ===================================================================================================
+# POINT 8 : charge a produit inconnu
+# ===================================================================================================
+Reset-MockState
+$base8 = New-Base 'P8'; $allBases.Add($base8)
+$p8 = Get-BaseParams $base8 @('Mail', 'SharePoint')
+$r8a = Invoke-Connector $p8 $base8
+$cf8 = ($r8a.Console -replace '\s+', ' ')
+T 8 'pas de crash' ([string]::IsNullOrEmpty($r8a.Crash)) $r8a.Crash
+T 8 '(v2.6 echec rapide) SharePoint sans identifiant : exit 1 a l''etape 1, message « l''identifiant du produit Cloudiway pour SharePoint n''est pas connu : relancez avec -ProductIds ou un fichier productmap.json, ou retirez SharePoint de -Workloads »' ($r8a.Exit -eq 1 -and $cf8.Contains('l''identifiant du produit Cloudiway pour SharePoint n''est pas connu : relancez avec -ProductIds ou un fichier productmap.json, ou retirez SharePoint de -Workloads')) "exit=$($r8a.Exit)"
+T 8 '(v2.6) aucune ecriture ni appel reseau : ni application, ni connecteur, ni identifiant, ni compte de service' (-not (Get-MockApp $AppSrc) -and @($global:MockCiw.Connectors).Count -eq 0 -and $r8a.CiwWrites -eq 0 -and $r8a.GraphCalls -eq 0 -and $r8a.Connects -eq 0 -and -not (Get-MockUser $SvcSrc)) "graph=$($r8a.GraphCalls)"
+T 8 'avertissement produit inconnu des le recapitulatif (echec rapide annonce)' ($r8a.Console -match 'sans produit Cloudiway connu' -and $r8a.Console -match 'ECHEC RAPIDE') 'avertissement absent'
+$app8 = $null
+# Relance avec -ProductIds : le connecteur est cree, identifiants generes a ce passage (aucun -RotateCredentials necessaire)
+$p8b = $p8.Clone(); $p8b['ProductIds'] = '5,7'
+$r8b = Invoke-Connector $p8b $base8
+$c8b = Get-MockConnector $ConnSrc
+T 8 'relance avec -ProductIds 5,7 : connecteur cree (produits [5,7]), identifiants generes, exit 0' ($r8b.Exit -eq 0 -and $c8b -and $c8b.rawProductList -eq '[5,7]' -and (Test-ConnCoherence $ConnSrc $AppSrc $SvcSrc) -eq '') "exit=$($r8b.Exit) connecteur=$($c8b.rawProductList) incoherence=$(Test-ConnCoherence $ConnSrc $AppSrc $SvcSrc)"
+Reset-MockState
+$base8d = New-Base 'P8d'; $allBases.Add($base8d)
+$p8d = Get-BaseParams $base8d @('Mail', 'SharePoint'); $p8d['ProductIds'] = '5,7'
+$r8d = Invoke-Connector $p8d $base8d
+$c8 = Get-MockConnector $ConnSrc
+T 8 '-ProductIds explicite (un passage) : connecteur cree (produits [5,7]), exit 0' ($c8 -and $c8.rawProductList -eq '[5,7]' -and $r8d.Exit -eq 0) "exit=$($r8d.Exit) connecteur=$($c8.rawProductList) $($r8d.Crash)"
+Reset-MockState
+
+# ===================================================================================================
 # POINT 21 : -SkipCloudiway, puis echec Cloudiway apres creation du certificat, puis relance
 # ===================================================================================================
 Reset-MockState
@@ -479,7 +544,7 @@ $r21a = Invoke-Connector $pSk $base21
 $appSk = @(Get-MockApp $AppSrc)[0]
 T 21 '-SkipCloudiway (+ -ProjectId) : exit 0, aucun appel Cloudiway, aucun mot de passe demande' ($r21a.Exit -eq 0 -and @($r21a.Calls | Where-Object Kind -EQ 'Ciw').Count -eq 0 -and $r21a.AskedCount -eq 0) "exit=$($r21a.Exit) appels Ciw=$(@($r21a.Calls | ? Kind -EQ 'Ciw').Count) questions=$($r21a.AskedCount) $($r21a.Crash)"
 T 21 '-SkipCloudiway : aucun certificat ni secret genere (aucun moyen de les transmettre), annonce clairement' ($appSk -and @($appSk.keyCredentials).Count -eq 0 -and @($appSk.passwordCredentials).Count -eq 0 -and $r21a.Console -match 'Aucun certificat ni secret ne sera genere') "certs=$(@($appSk.keyCredentials).Count)"
-T 21 '-SkipCloudiway : Mail seul, isFallbackPublicClient NON active (pas de compte de service) ; rapport : relancer sans l''option' ($appSk -and $appSk.isFallbackPublicClient -ne $true -and (Read-RunFile $r21a 'Rapport-*.md') -match 'Declarer le connecteur dans Cloudiway') 'rapport/clientpublic'
+T 21 '-SkipCloudiway : Mail seul, isFallbackPublicClient ACTIVE (v2.7 : le compte administrateur est requis par Mail, cree cote tenant) ; rapport : relancer sans l''option' ($appSk -and $appSk.isFallbackPublicClient -eq $true -and (Read-RunFile $r21a 'Rapport-*.md') -match 'Declarer le connecteur dans Cloudiway') 'rapport/clientpublic'
 $pSk2 = Get-BaseParams $base21 @('Mail')
 $r21b = Invoke-Connector $pSk2 $base21
 T 21 'relance SANS -SkipCloudiway : certificat genere ET connecteur cree dans le meme passage (sans -RotateCredentials), exit 0' ($r21b.Exit -eq 0 -and (Test-ConnCoherence $ConnSrc $AppSrc) -eq '' -and @(@(Get-MockApp $AppSrc)[0].keyCredentials).Count -eq 1) "exit=$($r21b.Exit) incoherence=$(Test-ConnCoherence $ConnSrc $AppSrc) $($r21b.Crash)"
@@ -574,6 +639,61 @@ $global:MockOpts.OnWrite = $null
 T 17 'au moment du PATCH qui ajoute le certificat : aucun .pfx / .secret.json / etat-*.json n''existe (identifiants en memoire seulement)' ($global:HookFiles -eq 0 -and $r17b.Exit -eq 0) "fichiers=$($global:HookFiles) exit=$($r17b.Exit)"
 
 # ===================================================================================================
+# POINT 9 : homonyme sans etiquette puis -AdoptExisting (Cible OneDrive : compte de service)
+# ===================================================================================================
+Reset-MockState
+$base9 = New-Base 'P9'; $allBases.Add($base9)
+$seedApp = @{ id = [guid]::NewGuid().ToString(); appId = [guid]::NewGuid().ToString(); displayName = $AppTgt; tags = @(); signInAudience = 'AzureADMyOrg'; isFallbackPublicClient = $false; requiredResourceAccess = @(); keyCredentials = @(); passwordCredentials = @(); web = @{ redirectUris = @() } }
+$global:MockTenant.Apps.Add($seedApp)
+$seedPwd = 'seed-pwd-existant-seed'
+$global:MockTenant.Users.Add(@{ id = [guid]::NewGuid().ToString(); userPrincipalName = $SvcTgt; displayName = 'svc existant'; mailNickname = 'svc'; accountEnabled = $true; passwordPolicies = $null; employeeType = $null; assignedLicenses = @(); PwdMarker = $seedPwd })
+Add-Secret $seedPwd
+$p9 = Get-BaseParams $base9 @('OneDrive') 'Target'
+$r9a = Invoke-Connector $p9 $base9
+$rows9 = Get-PlanRows $r9a
+T 9 'sans -AdoptExisting : pas de crash' ([string]::IsNullOrEmpty($r9a.Crash)) $r9a.Crash
+T 9 'sans -AdoptExisting : application ET compte de service BLOQUE' ((@($rows9 | Where-Object { $_.Zone -eq 'Application' -and $_.Action -eq 'BLOQUE' }).Count -eq 1) -and (@($rows9 | Where-Object { $_.Zone -eq 'Compte service' -and $_.Action -eq 'BLOQUE' }).Count -ge 1)) "lignes=$(Get-PlanBrief $rows9)"
+T 9 'sans -AdoptExisting : AUCUNE ecriture (Graph + Cloudiway)' ($r9a.GraphWrites -eq 0 -and $r9a.CiwWrites -eq 0) "graph=$($r9a.GraphWrites) ciw=$($r9a.CiwWrites)"
+T 9 'sans -AdoptExisting : exit 1' ($r9a.Exit -eq 1) "exit=$($r9a.Exit)"
+T 9 'sans -AdoptExisting : objets homonymes inchanges, mot de passe du compte non reinitialise' ((@($seedApp.tags).Count -eq 0) -and $seedApp.isFallbackPublicClient -eq $false -and -not (Get-MockUser $SvcTgt).employeeType -and (Get-MockUser $SvcTgt).PwdMarker -eq $seedPwd) 'objet existant modifie'
+$p9b = $p9.Clone(); $p9b['AdoptExisting'] = $true
+$r9b = Invoke-Connector $p9b $base9
+$repR9b = Read-RunFile $r9b 'Rapport-*.md'   # relu tout de suite : le passage suivant (r9c) reecrit le meme dossier de sortie (meme minute)
+$usr9 = Get-MockUser $SvcTgt; $c9 = Get-MockConnector $ConnTgt; $st9 = Get-Settings $c9
+T 9 '-AdoptExisting : pas de crash, exit 0' ([string]::IsNullOrEmpty($r9b.Crash) -and $r9b.Exit -eq 0) "exit=$($r9b.Exit) $($r9b.Crash)"
+T 9 '-AdoptExisting : application adoptee (etiquette + client public) et completee (certificat)' (@($seedApp.tags) -contains 'CloudiwayConnector' -and $seedApp.isFallbackPublicClient -eq $true -and @($seedApp.keyCredentials).Count -eq 1) "tags=$(@($seedApp.tags) -join ',')"
+T 9 '-AdoptExisting : compte adopte (etiquette + expiration desactivee)' ($usr9.employeeType -eq 'CloudiwayConnector' -and $usr9.passwordPolicies -match 'DisablePasswordExpiration') "employeeType=$($usr9.employeeType)"
+T 9 '-AdoptExisting : mot de passe du compte NON reinitialise (jamais envoye dans une requete)' ($usr9.PwdMarker -eq $seedPwd -and -not ($r9b.Calls | Where-Object { $_.Body -match 'passwordProfile' })) 'mot de passe modifie ou envoye'
+T 9 '-AdoptExisting : aucun POST /users' (@($r9b.Calls | Where-Object { $_.Method -eq 'POST' -and $_.Path -eq '/users' }).Count -eq 0) 'utilisateur recree'
+T 9 '-AdoptExisting : connecteur cree SANS mot de passe de compte (jamais invente), compte de service reference' ($c9 -and $st9.MigrationAccount -eq $SvcTgt -and -not $st9.MigrationAccountPassword) "settings=$($c9.rawSettings -replace '"[^"]*Password":"[^"]*"','***')"
+T 9 '-AdoptExisting : le rapport demande de saisir le mot de passe du compte adopte dans le portail Cloudiway' ((Read-RunFile $r9b 'Rapport-*.md') -match 'saisir son mot de passe dans le portail') 'consigne absente du rapport'
+$r9c = Invoke-Connector (Keep $p9b) $base9
+$bad9c = @(Get-PlanRows $r9c | Where-Object { $_.Action -notin 'OK', 'IGNORE', 'SKIP' })
+T 9 'adoption rejouee : exit 0, zero ecriture Graph et Cloudiway, plan sans CREER/MAJ/BLOQUE' ($r9c.Exit -eq 0 -and $r9c.GraphWrites -eq 0 -and $r9c.CiwWrites -eq 0 -and $bad9c.Count -eq 0) "exit=$($r9c.Exit) graph=$($r9c.GraphWrites) ciw=$($r9c.CiwWrites) $(Get-PlanBrief $bad9c)"
+
+# POINT 20 : compte de service (reinitialisation du mot de passe seulement si necessaire, jamais un compte non etiquete)
+# ===================================================================================================
+Reset-MockState
+$base20 = New-Base 'SA'; $allBases.Add($base20)
+$seedTag = 'seed-etiquete-seed'
+$global:MockTenant.Users.Add(@{ id = [guid]::NewGuid().ToString(); userPrincipalName = $SvcTgt; displayName = 'svc outil'; mailNickname = 'svc'; accountEnabled = $true; passwordPolicies = 'DisablePasswordExpiration'; employeeType = 'CloudiwayConnector'; assignedLicenses = @(); PwdMarker = $seedTag })
+Add-Secret $seedTag
+$p20 = Get-BaseParams $base20 @('OneDrive') 'Target'
+$r20a = Invoke-Connector $p20 $base20
+$us20 = Get-MockUser $SvcTgt
+T 20 'compte etiquete existant + connecteur a creer : mot de passe REINITIALISE (le connecteur doit en recevoir un) et transmis, aucun POST /users, role SharePoint Administrator' ($r20a.Exit -eq 0 -and $us20.PwdMarker -ne $seedTag -and (Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) -eq '' -and @($r20a.Calls | Where-Object { $_.Method -eq 'POST' -and $_.Path -eq '/users' }).Count -eq 0 -and (Test-MockRole $us20.id $global:MockRoleTpl.SPA)) "exit=$($r20a.Exit) incoherence=$(Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) $($r20a.Crash)"
+$pwKeep = $us20.PwdMarker
+$r20b = Invoke-Connector (Keep $p20) $base20
+T 20 'second passage : mot de passe du compte NON reinitialise (aucun PATCH /users), zero ecriture' ($r20b.Exit -eq 0 -and (Get-MockUser $SvcTgt).PwdMarker -eq $pwKeep -and @($r20b.Calls | Where-Object { $_.Path -like '/users/*' -and $_.IsWrite }).Count -eq 0 -and $r20b.GraphWrites -eq 0 -and $r20b.CiwWrites -eq 0) "exit=$($r20b.Exit) $(Get-WriteBrief $r20b.Calls)"
+Reset-MockState
+$base20c = New-Base 'SA2'; $allBases.Add($base20c)
+$global:MockTenant.Users.Add(@{ id = [guid]::NewGuid().ToString(); userPrincipalName = $SvcTgt; displayName = 'svc outil'; mailNickname = 'svc'; accountEnabled = $true; passwordPolicies = 'DisablePasswordExpiration'; employeeType = 'CloudiwayConnector'; assignedLicenses = @(); PwdMarker = 'seed-existant-seed' })
+$p20c = Get-BaseParams $base20c @('OneDrive') 'Target'; $p20c['SkipCloudiway'] = $true; $p20c.Remove('Cloudiway'); $p20c['ProjectId'] = 12345
+$r20c = Invoke-Connector $p20c $base20c
+$usN8 = Get-MockUser $SvcTgt
+T 20 'compte etiquete existant, -SkipCloudiway : role SharePoint Administrator attribue, aucun POST /users, mot de passe intact (rien ne pourrait le transmettre), exit 0' ($r20c.Exit -eq 0 -and (Test-MockRole $usN8.id $global:MockRoleTpl.SPA) -and @($r20c.Calls | Where-Object { $_.Method -eq 'POST' -and $_.Path -eq '/users' }).Count -eq 0 -and $usN8.PwdMarker -eq 'seed-existant-seed') "exit=$($r20c.Exit) role=$(Test-MockRole $usN8.id $global:MockRoleTpl.SPA)"
+
+# ===================================================================================================
 # POINT 15 : -Workloads en une seule chaine (pwsh -File)
 # ===================================================================================================
 Reset-MockState
@@ -589,32 +709,6 @@ Reset-MockState
 $p15b = Get-BaseParams (New-Base 'P15b') @('Mail', 'bogus')
 $r15b = Invoke-Connector $p15b $p15b.OutDir
 T 15 'charge inconnue refusee (exit 1, aucune connexion)' ($r15b.Exit -eq 1 -and $r15b.Connects -eq 0) "exit=$($r15b.Exit)"
-# charges non disponibles dans cette version : refusees avec un message clair, avant toute connexion
-foreach ($wn in 'SharePoint', 'Teams', 'Archive', 'GalSync', 'Intune', 'FreeBusy', 'Signature', 'MailRouting') {
-    Reset-MockState
-    $b15x = New-Base ('P15-' + $wn); $allBases.Add($b15x)
-    $r15x = Invoke-Connector (Get-BaseParams $b15x @('Mail', $wn)) $b15x
-    T 15 "charge $wn : refusee avec « non disponible dans cette version » (exit 1, aucune connexion, aucune ecriture)" ($r15x.Exit -eq 1 -and $r15x.Connects -eq 0 -and $r15x.GraphCalls -eq 0 -and $r15x.CiwWrites -eq 0 -and $r15x.Console -match 'non disponible dans cette version') "exit=$($r15x.Exit) $($r15x.Crash)"
-}
-Reset-MockState
-$b15y = New-Base 'P15-all'; $allBases.Add($b15y)
-$p15y = Get-BaseParams $b15y @('All'); $p15y['WhatIf'] = $true
-$r15y = Invoke-Connector $p15y $b15y
-T 15 '-Workloads All = Mail et OneDrive seulement (rapport), exit 0' ($r15y.Exit -eq 0 -and (Read-RunFile $r15y 'Rapport-*.md') -match 'Charges de travail : Mail, OneDrive') "exit=$($r15y.Exit) $($r15y.Crash)"
-# -Mode Cible : refuse a la liaison des parametres (ValidateSet), aucun appel
-Reset-MockState
-$b15z = New-Base 'P15-mode'
-$p15z = Get-BaseParams $b15z @('Mail') 'Target'
-$r15z = Invoke-Connector $p15z $b15z
-T 15 '-Mode autre que Source : refuse a la liaison des parametres, aucun appel' ($r15z.Calls.Count -eq 0 -and $r15z.Crash -match 'Source') "appels=$($r15z.Calls.Count) crash=$($r15z.Crash)"
-# charge non disponible tapee dans la question interactive : message explicite puis nouvelle question
-if (-not [Console]::IsInputRedirected) {
-    Reset-MockState
-    $b15w = New-Base 'P15-ask'; $allBases.Add($b15w)
-    $p15w = Get-BaseParams $b15w @(); $p15w.Remove('Workloads'); $p15w['WhatIf'] = $true
-    $r15w = Invoke-Connector $p15w $b15w @('Teams', '1', $global:MockCwPassword)
-    T 15 'question interactive : « Teams » refuse avec « non disponible dans cette version », puis choix Mail accepte, exit 0' ($r15w.Exit -eq 0 -and $r15w.Console -match 'non disponible dans cette version' -and $r15w.QueueLeft -eq 0) "exit=$($r15w.Exit) file=$($r15w.QueueLeft) $($r15w.Crash)"
-}
 
 # ===================================================================================================
 # POINT 13 : mode questions (console interactive requise) : tout est demande, y compris le mot de passe masque
@@ -624,7 +718,7 @@ $base13 = New-Base 'P13'; $allBases.Add($base13)
 if ([Console]::IsInputRedirected) {
     Skip 13 'mode questions' 'entree standard redirigee : Test-Interactive est faux (relancer depuis une console ou laisser le banc se relancer en console masquee)'
 } else {
-    $q13 = @('contoso.onmicrosoft.com', $global:MockUser, '1,2', $global:MockCwLogin, 'o', $global:MockCwPassword, 'o')   # mode, tenant, admin, charges, compte Cloudiway, demarrer, mot de passe, appliquer
+    $q13 = @('1', 'contoso.onmicrosoft.com', $global:MockUser, '1,2', $global:MockCwLogin, 'o', $global:MockCwPassword, 'o')   # mode, tenant, admin, charges, compte Cloudiway, demarrer, mot de passe, appliquer
     $r13 = Invoke-Connector @{ OutDir = $base13 } $base13 $q13
     $app13 = @(Get-MockApp $AppSrc)[0]
     $cmp13 = Compare-Sets (Get-MockAppPerms $app13) $expSrcMailOd
@@ -676,8 +770,8 @@ $rB1 = Invoke-Connector (Get-BaseParams $baseB) $baseB
 T B 'B2 429 (lecture puis ecriture) puis succes : exit 0, application creee une seule fois' ($rB1.Exit -eq 0 -and @(Get-MockApp $AppSrc).Count -eq 1 -and $global:MockSleeps.Count -ge 3) "exit=$($rB1.Exit) apps=$(@(Get-MockApp $AppSrc).Count) pauses=$($global:MockSleeps.Count) $($rB1.Crash)"
 Reset-MockState; $global:MockOpts.Forbid = @(@{ Method = 'POST'; Pattern = '^/applications$' })
 $baseB = New-Base 'B3'; $allBases.Add($baseB)
-$rB3 = Invoke-Connector (Get-BaseParams $baseB @('OneDrive')) $baseB
-T B 'B3 403 sur POST /applications : exit 2, pas de crash, Cloudiway non touche' ($rB3.Exit -eq 2 -and [string]::IsNullOrEmpty($rB3.Crash) -and @($global:MockCiw.Connectors).Count -eq 0) "exit=$($rB3.Exit) connecteurs=$(@($global:MockCiw.Connectors).Count) $($rB3.Crash)"
+$rB3 = Invoke-Connector (Get-BaseParams $baseB @('OneDrive') 'Target') $baseB
+T B 'B3 403 cible sur POST /applications : exit 2, pas de crash, compte de service quand meme traite, Cloudiway non touche' ($rB3.Exit -eq 2 -and [string]::IsNullOrEmpty($rB3.Crash) -and (Get-MockUser $SvcTgt) -and @($global:MockCiw.Connectors).Count -eq 0) "exit=$($rB3.Exit) svc=$([bool](Get-MockUser $SvcTgt)) connecteurs=$(@($global:MockCiw.Connectors).Count) $($rB3.Crash)"
 T B 'B3b 403 : les etapes dependantes sont IGNOREES et le rapport l''indique' ($rB3.Console -match 'IGNORE' -and ((Read-RunFile $rB3 'Rapport-*.md') -match 'ECHEC')) 'rapport sans ECHEC/IGNORE'
 Reset-MockState; $global:MockOpts.Replication404 = 2; $global:MockTenant.Rep404Left = 2
 $baseB = New-Base 'B4'; $allBases.Add($baseB)
@@ -741,7 +835,7 @@ T B 'sens different (Cible existante, Source demandee) : BLOQUE meme avec -Adopt
 Reset-MockState
 $baseN4 = New-Base 'N4'; $allBases.Add($baseN4)
 $global:MockOpts.OnWrite = { param($Method, $Path, $Body) if ($Method -eq 'POST' -and $Path -eq '/roleManagement/directory/roleAssignments') { $global:MockThrowOnDate = $true } }   # arme apres le dernier role attribue
-$pN4 = Get-BaseParams $baseN4 @('Mail'); $pN4['CertificateTransport'] = 'Path'
+$pN4 = Get-BaseParams $baseN4 @('OneDrive') 'Target'; $pN4['CertificateTransport'] = 'Path'
 $rN4 = Invoke-Connector $pN4 $baseN4
 $global:MockOpts.OnWrite = $null; $global:MockThrowOnDate = $false
 T B 'exception simulee apres l''application : l''execution est interrompue (pas de code de sortie normal)' ($rN4.Crash -match 'interruption simulee') "crash='$($rN4.Crash)'"
@@ -790,33 +884,33 @@ function Set-MockConnectorSetting($Conn, [string]$Key, $Value) {
     $Conn.rawSettings = ($s | ConvertTo-Json -Compress)
 }
 function Get-PutBodyJson($Conn) { if ($Conn -and $Conn._body) { $Conn._body | ConvertTo-Json -Depth 20 -Compress } else { '' } }
-function New-SourceMailOd([string]$Tag, [hashtable]$Extra = @{}) {
-    # Source Mail+OneDrive, produits 5,6 : cree le connecteur. Retourne @{ Base; Params; Run }
+function New-TargetOneDrive([string]$Tag, [hashtable]$Extra = @{}) {
+    # Cible Mail+OneDrive (compte de service), produits 5,6 : cree le connecteur. Retourne @{ Base; Params; Run }
     Reset-MockState
     $b = New-Base $Tag; $allBases.Add($b)
-    $p = Get-BaseParams $b @('Mail', 'OneDrive'); $p['ProductIds'] = '5,6'
+    $p = Get-BaseParams $b @('Mail', 'OneDrive') 'Target'; $p['ProductIds'] = '5,6'
     foreach ($k in $Extra.Keys) { $p[$k] = $Extra[$k] }
     @{ Base = $b; Params = $p; Run = (Invoke-Connector $p $b) }
 }
 
 # --- B1 (v2.4, faits mesures 4) : mise a jour necessaire SANS nouvel identifiant (-KeepCredentials) : le portail exige le certificat lors d'un PUT -> BLOQUE, aucun PUT ---
-$q1 = New-SourceMailOd 'Q1'
-$cQ1 = Get-MockConnector $ConnSrc; $stQ1 = Get-Settings $cQ1; $certQ1 = Get-ConnCert $cQ1; $fileQ1 = $cQ1.connectorCertificate.fileName
+$q1 = New-TargetOneDrive 'Q1'
+$cQ1 = Get-MockConnector $ConnTgt; $stQ1 = Get-Settings $cQ1; $certQ1 = Get-ConnCert $cQ1; $fileQ1 = $cQ1.connectorCertificate.fileName
 $global:MockOpts.CiwMaskSecrets = $true   # le portail masque secrets et contenu du certificat a la lecture
 $pQ1b = $q1.Params.Clone(); $pQ1b['ProductIds'] = '5,6,7'; $pQ1b['KeepCredentials'] = $true
 $putA0 = $global:MockCiw.PutAttempts
 $rQ1b = Invoke-Connector $pQ1b $q1.Base
-$cQ1b = Get-MockConnector $ConnSrc; $certQ1b = Get-ConnCert $cQ1b
+$cQ1b = Get-MockConnector $ConnTgt; $certQ1b = Get-ConnCert $cQ1b
 $cwQ1 = @(Get-PlanRows $rQ1b | Where-Object { $_.Zone -eq 'Cloudiway' })[0]
 T 25 'B1 (d) : -KeepCredentials + produit manquant sur un connecteur qui possede un certificat : ligne Cloudiway BLOQUE « le portail exige le certificat lors d''une mise a jour : relancer sans -KeepCredentials »' ($cwQ1 -and $cwQ1.Action -eq 'BLOQUE' -and $cwQ1.Raison -match 'le portail exige le certificat lors d.une mise a jour' -and $cwQ1.Raison -match 'relancer sans -KeepCredentials') "ligne=$($cwQ1.Action) $($cwQ1.Raison)"
 T 25 'B1 (d) : AUCUN PUT n''est tente (pas de PUT sans certificat : HTTP 500 constate), aucune ecriture Graph, connecteur inchange (produits, certificat, fichier), code de sortie 1' ($rQ1b.Exit -eq 1 -and $global:MockCiw.PutAttempts -eq $putA0 -and $rQ1b.CiwWrites -eq 0 -and $rQ1b.GraphWrites -eq 0 -and $cQ1b.rawProductList -eq '[5,6]' -and $certQ1b.Thumbprint -eq $certQ1.Thumbprint -and $cQ1b.connectorCertificate.fileName -eq $fileQ1) "exit=$($rQ1b.Exit) tentatives=$($global:MockCiw.PutAttempts - $putA0) produits=$($cQ1b.rawProductList)"
 $global:MockOpts.CiwMaskSecrets = $false
 # meme situation mais le marqueur est incoherent (renouvellement decide par le module Entra) : le PUT part AVEC le certificat, produits en union
-$cQ1c = Get-MockConnector $ConnSrc; $cQ1c.connectorCertificate.fileName = 'CIW1_' + ('AB' * 16) + '_20270101.pfx'
+$cQ1c = Get-MockConnector $ConnTgt; $cQ1c.connectorCertificate.fileName = 'CIW1_' + ('AB' * 16) + '_20270101.pfx'
 $global:MockOpts.CiwMaskSecrets = $true
 $rQ1c = Invoke-Connector $pQ1b $q1.Base
-$cQ1d = Get-MockConnector $ConnSrc; $stQ1d = Get-Settings $cQ1d; $certQ1d = Get-ConnCert $cQ1d
-T 25 'B1 : -KeepCredentials avec marqueur incoherent (renouvellement) + produit manquant : un seul PUT AVEC le nouveau certificat, produits en union [5,6,7], aucun masque renvoye, connecteur coherent, exit 0' ($rQ1c.Exit -eq 0 -and $cQ1d.rawProductList -eq '[5,6,7]' -and $certQ1d.Thumbprint -ne $certQ1.Thumbprint -and $stQ1d.MigrationAccount -eq $SvcTgt -and $stQ1d.RestClientId -eq $stQ1.RestClientId -and (Get-PutBodyJson $cQ1d) -notmatch '\*{4}' -and (Test-ConnCoherence $ConnSrc $AppSrc) -eq '') "exit=$($rQ1c.Exit) produits=$($cQ1d.rawProductList) incoherence=$(Test-ConnCoherence $ConnSrc $AppSrc)"
+$cQ1d = Get-MockConnector $ConnTgt; $stQ1d = Get-Settings $cQ1d; $certQ1d = Get-ConnCert $cQ1d
+T 25 'B1 : -KeepCredentials avec marqueur incoherent (renouvellement) + produit manquant : un seul PUT AVEC le nouveau certificat, produits en union [5,6,7], aucun masque renvoye, connecteur coherent, exit 0' ($rQ1c.Exit -eq 0 -and $cQ1d.rawProductList -eq '[5,6,7]' -and $certQ1d.Thumbprint -ne $certQ1.Thumbprint -and $stQ1d.MigrationAccount -eq $SvcTgt -and $stQ1d.RestClientId -eq $stQ1.RestClientId -and (Get-PutBodyJson $cQ1d) -notmatch '\*{4}' -and (Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) -eq '') "exit=$($rQ1c.Exit) produits=$($cQ1d.rawProductList) incoherence=$(Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt)"
 $global:MockOpts.CiwMaskSecrets = $false
 # poolId / connectorTypeId : le corps du PUT reprend la lecture, sinon le portail les remet a 0 (fait mesure 5)
 T 25 'B1 : poolId et connectorTypeId du connecteur NON remis a 0 par le PUT (le corps reprend la lecture)' ($cQ1d.poolId -eq 3 -and "$($cQ1d.connectorTypeId)" -eq '2') "poolId=$($cQ1d.poolId) connectorTypeId=$($cQ1d.connectorTypeId)"
@@ -871,29 +965,58 @@ $global:MockOpts.CiwExpire = @(@{ Method = 'GET'; Path = '^/Projects$'; Nth = 3;
 $baseM2 = New-Base 'M2b'; $allBases.Add($baseM2)
 $rM2b = Invoke-Connector (Get-BaseParams $baseM2 @('Mail')) $baseM2 @($global:MockCwPassword, $global:MockCwPassword)
 T 25 'M2 : meme cas avec re-saisie du mot de passe : la session est renouvelee AVANT la premiere ecriture, tout est applique, exit 0' ($rM2b.Exit -eq 0 -and (Get-MockConnector $ConnSrc) -and (Test-ConnCoherence $ConnSrc $AppSrc) -eq '') "exit=$($rM2b.Exit) $($rM2b.Crash)"
+$putSeq = @($r10.Calls | Where-Object { $_.Kind -eq 'Ciw' -and $_.Method -eq 'PUT' } | ForEach-Object Seq)[0]
+$pwSeq = @($r10.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.Method -eq 'PATCH' -and $_.Path -like '/users/*' -and $_.Body -match 'passwordProfile' } | ForEach-Object Seq)[0]
+T 25 'M2 (v2.5) : rotation -RotateCredentials : le mot de passe du compte est reinitialise dans Entra AVANT l''ecriture du connecteur (PATCH /users avant PUT)' ($putSeq -and $pwSeq -and $pwSeq -lt $putSeq) "PUT seq=$putSeq mot de passe seq=$pwSeq"
+# M2 (v2.5) : ecriture du connecteur en echec APRES la reinitialisation dans Entra -> desynchronisation POSSIBLE dite clairement
+$q5 = New-TargetOneDrive 'Q5'
+$pwQ5 = (Get-MockUser $SvcTgt).PwdMarker
+$global:MockOpts.CiwFail = @(@{ Method = 'PUT'; Pattern = '^/Connectors/\d+$'; Code = 503; Times = 1 })
+$pQ5 = $q5.Params.Clone(); $pQ5['RotateCredentials'] = $true
+$rQ5 = Invoke-Connector $pQ5 $q5.Base
+$repQ5 = Read-RunFile $rQ5 'Rapport-*.md'
+T 25 'M2 (v2.5) : PUT en echec apres la reinitialisation : exit 2, mot de passe deja reinitialise dans Entra (PATCH avant PUT), « DESYNCHRONISATION POSSIBLE » avec la marche a suivre (relancer sans -KeepCredentials), aucun retrait' ($rQ5.Exit -eq 2 -and (Get-MockUser $SvcTgt).PwdMarker -ne $pwQ5 -and @($rQ5.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.Method -eq 'PATCH' -and $_.Body -match 'passwordProfile' }).Count -eq 1 -and $repQ5 -match 'DESYNCHRONISATION POSSIBLE' -and $repQ5 -match 'sans -KeepCredentials' -and @($rQ5.Calls | Where-Object { $_.Path -match 'removeKey$' }).Count -eq 0) "exit=$($rQ5.Exit)"
+T 25 'M2 (v2.5) : la ligne "mot de passe" est executee AVANT le connecteur (zone Mot de passe placee avant Cloudiway dans le plan applique)' (@(Get-PlanRows $rQ5 | Where-Object { $_.Zone -eq 'Mot de passe' }).Count -eq 1 -and $rQ5.Console -match 'Mot de passe') 'ligne mot de passe absente'
+# M2 (v2.5) : mot de passe du compte REFUSE par Entra (403) : aucun mot de passe ni certificat envoye, aucun PUT, message clair
+$q6 = New-TargetOneDrive 'Q6'
+$global:MockOpts.Forbid = @(@{ Method = 'PATCH'; Pattern = '^/users/' })
+$pQ6 = $q6.Params.Clone(); $pQ6['RotateCredentials'] = $true
+$rQ6 = Invoke-Connector $pQ6 $q6.Base
+$repQ6 = Read-RunFile $rQ6 'Rapport-*.md'
+T 25 'M2 (v2.5) : reinitialisation du mot de passe refusee par Entra : exit 2, AUCUN PUT / POST Cloudiway (renouvellement ANNULE), mot de passe non change dit clairement avec la marche a suivre' ($rQ6.Exit -eq 2 -and $rQ6.CiwWrites -eq 0 -and $repQ6 -match 'renouvellement du connecteur ANNULE' -and $repQ6 -match 'n.a pas pu .tre chang' -and (($rQ6.Console -replace '\s+', ' ') -match 'ressaisissez-le dans le portail Cloudiway')) "exit=$($rQ6.Exit) ciw=$($rQ6.CiwWrites)"
+$global:MockOpts.Forbid = @()
+
 # --- M3 : avertissement avant rotation sur connecteur existant ; certificat seul expire = PAS de reinitialisation du mot de passe ---
 T 25 'M3 : rotation sur connecteur existant : avertissement "ne pas appliquer pendant que des jobs de migration sont actifs" avant application' ($r10.Console -match 'jobs de migration sont actifs') 'avertissement absent'
+$q7 = New-TargetOneDrive 'Q7'
+$pwQ7 = (Get-MockUser $SvcTgt).PwdMarker
+$mkQ7 = Get-MockMarker (Get-MockConnector $ConnTgt)
+Set-MockKeyEnd (@(Get-MockApp $AppTgt)[0]) $mkQ7.Id 10   # le certificat expire dans 10 jours : renouvellement automatique
+$rQ7 = Invoke-Connector (Keep $q7.Params) $q7.Base
+$cQ7 = Get-MockConnector $ConnTgt
+T 25 'M3 : certificat seul a renouveler : nouveau certificat envoye (PUT, ancien retire : 1 seul certificat) mais mot de passe du compte NON reinitialise (ni PATCH /users) et connecteur coherent' ($rQ7.Exit -eq 0 -and @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count -eq 1 -and (Get-MockUser $SvcTgt).PwdMarker -eq $pwQ7 -and @($rQ7.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.Method -eq 'PATCH' -and $_.Path -like '/users/*' }).Count -eq 0 -and (Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) -eq '' -and (Get-ConnCert $cQ7).Thumbprint -ne $mkQ7.Id) "exit=$($rQ7.Exit) incoherence=$(Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt)"
+
 # --- M4 : collision de noms (TenantName / RestClientId differents) ---
-$q8 = New-SourceMailOd 'Q8'
-Set-MockConnectorSetting (Get-MockConnector $ConnSrc) 'TenantName' 'autre-tenant'
-$certsQ8 = @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count; $put8 = $global:MockCiw.PutCount
+$q8 = New-TargetOneDrive 'Q8'
+Set-MockConnectorSetting (Get-MockConnector $ConnTgt) 'TenantName' 'autre-tenant'
+$certsQ8 = @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count; $put8 = $global:MockCiw.PutCount
 $rQ8 = Invoke-Connector $q8.Params $q8.Base
 $cwQ8 = @(Get-PlanRows $rQ8 | Where-Object { $_.Zone -eq 'Cloudiway' })[0]
-T 25 'M4 : connecteur marque CIW1 designant un AUTRE TenantName : ligne Cloudiway BLOQUE (collision), aucun PUT, aucun certificat genere' ($cwQ8 -and $cwQ8.Action -eq 'BLOQUE' -and $cwQ8.Raison -match 'collision' -and $cwQ8.Raison -match 'autre-tenant' -and $global:MockCiw.PutCount -eq $put8 -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq $certsQ8) "ligne=$($cwQ8.Action) $($cwQ8.Raison)"
+T 25 'M4 : connecteur marque CIW1 designant un AUTRE TenantName : ligne Cloudiway BLOQUE (collision), aucun PUT, aucun certificat genere' ($cwQ8 -and $cwQ8.Action -eq 'BLOQUE' -and $cwQ8.Raison -match 'collision' -and $cwQ8.Raison -match 'autre-tenant' -and $global:MockCiw.PutCount -eq $put8 -and @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count -eq $certsQ8) "ligne=$($cwQ8.Action) $($cwQ8.Raison)"
 $pQ8a = $q8.Params.Clone(); $pQ8a['AdoptExisting'] = $true
 $rQ8a = Invoke-Connector $pQ8a $q8.Base
-T 25 'M4 : avec -AdoptExisting le blocage est leve et le TenantName est corrige (PUT), exit 0' ($rQ8a.Exit -eq 0 -and (Get-Settings (Get-MockConnector $ConnSrc)).TenantName -eq 'contoso') "exit=$($rQ8a.Exit) tenantName=$((Get-Settings (Get-MockConnector $ConnSrc)).TenantName)"
-$q9 = New-SourceMailOd 'Q9'
-Set-MockConnectorSetting (Get-MockConnector $ConnSrc) 'RestClientId' '99999999-0000-0000-0000-000000000009'
-$certsQ9 = @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count
+T 25 'M4 : avec -AdoptExisting le blocage est leve et le TenantName est corrige (PUT), exit 0' ($rQ8a.Exit -eq 0 -and (Get-Settings (Get-MockConnector $ConnTgt)).TenantName -eq 'contoso') "exit=$($rQ8a.Exit) tenantName=$((Get-Settings (Get-MockConnector $ConnTgt)).TenantName)"
+$q9 = New-TargetOneDrive 'Q9'
+Set-MockConnectorSetting (Get-MockConnector $ConnTgt) 'RestClientId' '99999999-0000-0000-0000-000000000009'
+$certsQ9 = @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count
 $rQ9 = Invoke-Connector $q9.Params $q9.Base
 $cwQ9 = @(Get-PlanRows $rQ9 | Where-Object { $_.Zone -eq 'Cloudiway' })[0]
-T 25 'M4 : connecteur marque CIW1 designant une AUTRE application (RestClientId) : BLOQUE (collision), aucun identifiant genere' ($cwQ9 -and $cwQ9.Action -eq 'BLOQUE' -and $cwQ9.Raison -match 'application' -and $cwQ9.Raison -match '99999999' -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq $certsQ9) "ligne=$($cwQ9.Action) $($cwQ9.Raison)"
+T 25 'M4 : connecteur marque CIW1 designant une AUTRE application (RestClientId) : BLOQUE (collision), aucun identifiant genere' ($cwQ9 -and $cwQ9.Action -eq 'BLOQUE' -and $cwQ9.Raison -match 'application' -and $cwQ9.Raison -match '99999999' -and @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count -eq $certsQ9) "ligne=$($cwQ9.Action) $($cwQ9.Raison)"
 # application supprimee dans le tenant alors que le connecteur existe : meme collision, rien n'est genere
-$null = $global:MockTenant.Apps.RemoveAll([Predicate[object]]{ param($x) $x.displayName -eq 'CLOUDIWAY-SOURCE-P12345' })
+$null = $global:MockTenant.Apps.RemoveAll([Predicate[object]]{ param($x) $x.displayName -eq 'CLOUDIWAY-TARGET-P12345' })
 $rQ9b = Invoke-Connector $q9.Params $q9.Base
 $cwQ9b = @(Get-PlanRows $rQ9b | Where-Object { $_.Zone -eq 'Cloudiway' })[0]
-T 25 'M4 : application absente du tenant alors que le connecteur existe : Cloudiway BLOQUE (collision), AUCUN certificat genere pour l''application recreee' ($cwQ9b -and $cwQ9b.Action -eq 'BLOQUE' -and $cwQ9b.Raison -match 'n''existe pas' -and @(@(Get-MockApp $AppSrc)[0].keyCredentials).Count -eq 0) "ligne=$($cwQ9b.Action) $($cwQ9b.Raison)"
+T 25 'M4 : application absente du tenant alors que le connecteur existe : Cloudiway BLOQUE (collision), AUCUN certificat genere pour l''application recreee' ($cwQ9b -and $cwQ9b.Action -eq 'BLOQUE' -and $cwQ9b.Raison -match 'n''existe pas' -and @(@(Get-MockApp $AppTgt)[0].keyCredentials).Count -eq 0) "ligne=$($cwQ9b.Action) $($cwQ9b.Raison)"
 
 # --- M5 : 2FA Cloudiway ---
 Reset-MockState; $global:MockCiw.LoginMode = '2fa'
@@ -932,6 +1055,35 @@ T 26 '12 rotation : run.log contient keyId et customKeyIdentifier de CHAQUE anci
 $entraSrc = Get-Content -LiteralPath (Join-Path $pkg 'lib\entra.ps1') -Encoding utf8
 $webHard = @($entraSrc | Where-Object { $_ -notmatch '^\s*#' -and $_ -notmatch 'CloudiwayRedirectPlatform\s*=' -and ($_ -match "\.web\b|'web'|\bweb\s*=") })
 T 26 '13 plateforme des URI : une seule constante $script:CloudiwayRedirectPlatform ; plus de ".web" / ''web'' en dur dans entra.ps1' (@($entraSrc | Where-Object { $_ -match '^\$script:CloudiwayRedirectPlatform\s*=' }).Count -eq 1 -and $webHard.Count -eq 0) "occurrences en dur : $($webHard -join ' | ')"
+# --- 14 : passwordPolicies : fusion avec l'existant, aucun PATCH inutile ---
+Reset-MockState
+$baseG5 = New-Base 'G5'; $allBases.Add($baseG5)
+$global:MockTenant.Users.Add(@{ id = [guid]::NewGuid().ToString(); userPrincipalName = $SvcTgt; displayName = 'svc outil'; mailNickname = 'svc'; accountEnabled = $true; passwordPolicies = 'DisableStrongPassword'; employeeType = 'CloudiwayConnector'; assignedLicenses = @(); PwdMarker = 'seed-strong-seed' })
+$pG5 = Get-BaseParams $baseG5 @('OneDrive') 'Target'; $pG5['SkipCloudiway'] = $true; $pG5.Remove('Cloudiway'); $pG5['ProjectId'] = 12345
+$rG5 = Invoke-Connector $pG5 $baseG5
+$polG5 = "$((Get-MockUser $SvcTgt).passwordPolicies)"
+T 26 '14 compte avec DisableStrongPassword : DisablePasswordExpiration AJOUTE sans retirer DisableStrongPassword' ($rG5.Exit -eq 0 -and $polG5 -match 'DisableStrongPassword' -and $polG5 -match 'DisablePasswordExpiration') "exit=$($rG5.Exit) passwordPolicies=$polG5"
+Reset-MockState
+$baseG6 = New-Base 'G6'; $allBases.Add($baseG6)
+$global:MockTenant.Users.Add(@{ id = [guid]::NewGuid().ToString(); userPrincipalName = $SvcTgt; displayName = 'svc existant'; mailNickname = 'svc'; accountEnabled = $true; passwordPolicies = 'DisableStrongPassword, DisablePasswordExpiration'; employeeType = $null; assignedLicenses = @(); PwdMarker = 'seed-deja-seed' })
+$pG6 = Get-BaseParams $baseG6 @('OneDrive') 'Target'; $pG6['SkipCloudiway'] = $true; $pG6.Remove('Cloudiway'); $pG6['ProjectId'] = 12345; $pG6['AdoptExisting'] = $true
+$rG6 = Invoke-Connector $pG6 $baseG6
+$patchU = @($rG6.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.Method -eq 'PATCH' -and $_.Path -like '/users/*' })
+T 26 '14 adoption d''un compte ayant DEJA DisablePasswordExpiration : le PATCH n''ecrit pas passwordPolicies et la valeur est conservee' ($rG6.Exit -eq 0 -and $patchU.Count -eq 1 -and $patchU[0].Body -notmatch 'passwordPolicies' -and "$((Get-MockUser $SvcTgt).passwordPolicies)" -eq 'DisableStrongPassword, DisablePasswordExpiration') "PATCH=$($patchU.Count) corps=$($patchU[0].Body) policies=$((Get-MockUser $SvcTgt).passwordPolicies)"
+
+# --- 15 : MFA : valeurs de securite par defaut ; conseil sur "not allowed as per assigned policy" ---
+Reset-MockState; $global:MockOpts.SecurityDefaults = $true
+$baseG7 = New-Base 'G7'; $allBases.Add($baseG7)
+$pG7 = Get-BaseParams $baseG7 @('OneDrive') 'Target'; $pG7['WhatIf'] = $true
+$rG7 = Invoke-Connector $pG7 $baseG7
+T 26 '15 valeurs de securite par defaut ACTIVES : avertissement MFA dans le plan (lecture de /policies/identitySecurityDefaultsEnforcementPolicy)' (@($rG7.Calls | Where-Object { $_.Path -eq '/policies/identitySecurityDefaultsEnforcementPolicy' }).Count -eq 1 -and @(Get-PlanRows $rG7 | Where-Object { $_.Element -match 'securite par defaut' -and $_.Raison -match 'ACTIVES' }).Count -eq 1) "plan=$(Get-PlanBrief (Get-PlanRows $rG7))"
+Reset-MockState
+$global:MockOpts.ForbidPolicy = @(@{ Method = 'POST'; Pattern = '^/users$' })
+$baseG8 = New-Base 'G8'; $allBases.Add($baseG8)
+$rG8 = Invoke-Connector (Get-BaseParams $baseG8 @('OneDrive') 'Target') $baseG8
+T 26 '15 "not allowed as per assigned policy" : le message d''echec porte un CONSEIL (acces conditionnel / valeurs de securite par defaut)' ($rG8.Exit -eq 2 -and (Read-RunFile $rG8 'Rapport-*.md') -match 'CONSEIL' -and (Read-RunFile $rG8 'Rapport-*.md') -match 'valeurs de securite par defaut') "exit=$($rG8.Exit)"
+
+# ===================================================================================================
 # POINT 27 : mineurs (16 a 20)
 # ===================================================================================================
 # 16 : $global:Error vide en fin de run ; secrets de masquage ; corps JSON du login annule (AST)
@@ -968,6 +1120,7 @@ T 27 '18 ConvertTo-MaskedJson -KeepKeys : externalKey lisible, toute autre cle s
 Remove-Module CiwUnit -Force -ErrorAction SilentlyContinue
 
 # 17 : notices affichees dans les prochaines actions (adoption : mot de passe du compte a saisir dans le portail)
+T 27 '17 notices Cloudiway affichees dans les "prochaines actions" (rapport et console)' ($repR9b -match 'A savoir \(Cloudiway\)' -and $repR9b -match 'mot de passe non genere dans ce passage' -and $r9b.Console -match 'A savoir \(Cloudiway\)') 'notice absente'
 
 # 19 : ValidityDays >= 45 ; delai de renouvellement = validite - 30 jours
 Reset-MockState
@@ -975,13 +1128,22 @@ $baseH2 = New-Base 'H2'; $allBases.Add($baseH2)
 $pH2 = Get-BaseParams $baseH2 @('Mail'); $pH2['ValidityDays'] = 40
 $rH2 = Invoke-Connector $pH2 $baseH2
 T 27 '19 -ValidityDays 40 refuse (minimum 45) a la liaison des parametres : aucun appel, aucune ecriture' ($rH2.Crash -match '45' -and $rH2.Calls.Count -eq 0) "crash=$($rH2.Crash) appels=$($rH2.Calls.Count)"
-T 27 '19 information d''expiration calculee sur l''expiration REELLE du certificat (v2.2) : 180 jours -> "dans 180 jours", 90 jours -> "dans 90 jours", jamais un delai en mois en dur' ($r1.Console -match 'expire le \d\d/\d\d/\d{4} \(dans 180 jours\)' -and $r19e.Console -match 'expire le \d\d/\d\d/\d{4} \(dans 90 jours\)' -and $r1.Console -notmatch 'environ 5 mois|dans environ') 'delai non calcule'
+T 27 '19 information d''expiration calculee sur l''expiration REELLE du certificat (v2.2) : 180 jours -> "dans 180 jours", 90 jours -> "dans 90 jours", jamais un delai en mois en dur' ($r1.Console -match 'expire le \d\d/\d\d/\d{4} \(dans 180 jours\)' -and $r19e.Console -match 'expirent le \d\d/\d\d/\d{4} \(dans 90 jours\)' -and $r1.Console -notmatch 'environ 5 mois|dans environ') 'delai non calcule'
 Reset-MockState
 $baseH3 = New-Base 'H3'; $allBases.Add($baseH3)
 $pH3 = Get-BaseParams $baseH3 @('Mail'); $pH3['ValidityDays'] = 45; $pH3['WhatIf'] = $false
 $rH3 = Invoke-Connector $pH3 $baseH3
 T 27 '19 -ValidityDays 45 accepte ; l''expiration est donnee en JOURS reels (45) et non en mois' ($rH3.Exit -eq 0 -and $rH3.Console -match '\(dans 45 jours\)') "exit=$($rH3.Exit)"
 
+# 20 : -ServiceAccountName avec @
+Reset-MockState
+$baseH4 = New-Base 'H4'; $allBases.Add($baseH4)
+$pH4 = Get-BaseParams $baseH4 @('OneDrive') 'Target'; $pH4['WhatIf'] = $true; $pH4['ServiceAccountName'] = 'admin@contoso.com'
+$rH4 = Invoke-Connector $pH4 $baseH4
+T 27 '20 -ServiceAccountName admin@contoso.com refuse (UPN complet sans prefixe svc-ciw-) : exit 1 immediat, aucun appel' ($rH4.Exit -eq 1 -and $rH4.Calls.Count -eq 0 -and $rH4.Console -match 'svc-ciw-') "exit=$($rH4.Exit) appels=$($rH4.Calls.Count)"
+$pH4b = $pH4.Clone(); $pH4b['ServiceAccountName'] = 'svc-ciw-perso@contoso.onmicrosoft.com'
+$rH4b = Invoke-Connector $pH4b $baseH4
+T 27 '20 -ServiceAccountName svc-ciw-perso@... accepte (prefixe local svc-ciw-) : exit 0' ($rH4b.Exit -eq 0 -and (Read-RunFile $rH4b 'Rapport-*.md') -match 'svc-ciw-perso@contoso\.onmicrosoft\.com') "exit=$($rH4b.Exit) $($rH4b.Crash)"
 # 20 : messages de blocage region / type d'authentification
 Reset-MockState
 $baseH5 = New-Base 'H5'; $allBases.Add($baseH5)
@@ -1064,7 +1226,7 @@ if ([Console]::IsInputRedirected) {
     $baseHB = New-Base 'HB'; $allBases.Add($baseHB)
     $pHB = Get-BaseParams $baseHB @(); $pHB.Remove('Workloads'); $pHB['WhatIf'] = $true
     $rHB = Invoke-Connector $pHB $baseHB @('', '1', $global:MockCwPassword)
-    T 28 'M9 : -Workloads absent : question sans valeur pre-cochee, privileges nommes (Exchange Administrator), Entree seule refusee, puis choix Mail, exit 0' ($rHB.Exit -eq 0 -and $rHB.Console -match 'Exchange Administrator' -and $rHB.Console -match 'Rien n''est pre-selectionne' -and $rHB.Console -match 'Au moins un element' -and $rHB.QueueLeft -eq 0 -and (Read-RunFile $rHB 'Rapport-*.md') -match 'Charges de travail : Mail\r?\n') "exit=$($rHB.Exit) file=$($rHB.QueueLeft) $($rHB.Crash)"
+    T 28 'M9 : -Workloads absent : question sans valeur pre-cochee, privileges nommes (SharePoint Administrator), Entree seule refusee, puis choix Mail, exit 0' ($rHB.Exit -eq 0 -and $rHB.Console -match 'SharePoint Administrator' -and $rHB.Console -match 'Rien n''est pre-selectionne' -and $rHB.Console -match 'Au moins un element' -and $rHB.QueueLeft -eq 0 -and (Read-RunFile $rHB 'Rapport-*.md') -match 'Charges de travail : Mail\r?\n') "exit=$($rHB.Exit) file=$($rHB.QueueLeft) $($rHB.Crash)"
 }
 $mainSrc = Get-Content -LiteralPath $main -Raw -Encoding utf8
 T 28 'M9 : sans console interactive, -Workloads est exige (plus de charges par defaut silencieuses) ; -ValidityDays valide de 45 a 730' ($mainSrc -match "aucune charge par defaut : indiquer explicitement" -and $mainSrc -match 'ValidateRange\(45, 730\)') 'defaut non supprime ou plage 30'
@@ -1196,9 +1358,10 @@ function Invoke-NonInteractive([string[]]$ScriptArgs) {
 }
 $niAll = @('-Mode', 'Source', '-Tenant', 'contoso.onmicrosoft.com', '-Admin365', 'admin365@contoso.com', '-Workloads', 'Mail', '-SkipCloudiway', '-ProjectId', '12345', '-Yes')
 $niCases = @(
+    @{ Name = '-Mode'; Drop = '-Mode'; Placeholder = '<Source|Target>' }
     @{ Name = '-Tenant'; Drop = '-Tenant'; Placeholder = '<contoso.onmicrosoft.com>' }
     @{ Name = '-Admin365'; Drop = '-Admin365'; Placeholder = '<admin365@contoso.com>' }
-    @{ Name = '-Workloads'; Drop = '-Workloads'; Placeholder = '<Mail,OneDrive>' }
+    @{ Name = '-Workloads'; Drop = '-Workloads'; Placeholder = '<Mail,OneDrive,SharePoint>' }
     @{ Name = '-ProjectId'; Drop = '-ProjectId'; Placeholder = '<12345>' }
     @{ Name = '-Yes'; Drop = '-Yes'; Placeholder = '-Yes' }
 )
@@ -1218,22 +1381,22 @@ foreach ($case in $niCases) {
 }
 $niNone = Invoke-NonInteractive @()
 $msgNone = @($niNone.Out -split "\r?\n" | Where-Object { $_ -match 'Parametres manquants' })
-$missAll = @('-Tenant', '-Admin365', '-Workloads', '-CloudiwayPat', '-Yes' | Where-Object { ($msgNone -join ' ') -notmatch [regex]::Escape($_) })
-T 30 'console non interactive, AUCUN parametre : un seul message liste TOUS les manquants (-Tenant, -Admin365, -Workloads, -CloudiwayPat, -Yes) + commande complete avec modeles et PAT' ($niNone.Exit -eq 1 -and $msgNone.Count -eq 1 -and $missAll.Count -eq 0 -and $niNone.Out -match 'Commande complete a relancer' -and $niNone.Out -match '-Mode Source' -and $niNone.Out -match '-CloudiwayPat \$pat' -and $niNone.Out -match 'Read-Host -AsSecureString') "exit=$($niNone.Exit) lignes=$($msgNone.Count) manquants non listes=[$($missAll -join ',')]"
+$missAll = @('-Mode', '-Tenant', '-Admin365', '-Workloads', '-CloudiwayPat', '-Yes' | Where-Object { ($msgNone -join ' ') -notmatch [regex]::Escape($_) })
+T 30 'console non interactive, AUCUN parametre : un seul message liste TOUS les manquants (-Mode, -Tenant, -Admin365, -Workloads, -CloudiwayPat, -Yes) + commande complete avec modeles et PAT' ($niNone.Exit -eq 1 -and $msgNone.Count -eq 1 -and $missAll.Count -eq 0 -and $niNone.Out -match 'Commande complete a relancer' -and $niNone.Out -match '<Source\|Target>' -and $niNone.Out -match '-CloudiwayPat \$pat' -and $niNone.Out -match 'Read-Host -AsSecureString') "exit=$($niNone.Exit) lignes=$($msgNone.Count) manquants non listes=[$($missAll -join ',')]"
 $niDisc = Invoke-NonInteractive @('-Discover')
 T 30 'console non interactive, -Discover sans PAT : le PAT est demande dans le message unique, commande avec -Discover -CloudiwayPat $pat' ($niDisc.Exit -eq 1 -and @($niDisc.Out -split "\r?\n" | Where-Object { $_ -match 'Parametres manquants' }).Count -eq 1 -and $niDisc.Out -match '-CloudiwayPat' -and $niDisc.Out -match '-Discover -CloudiwayPat \$pat') "exit=$($niDisc.Exit)"
 
 # Aide Get-Help : chaque parametre demande si absent le dit
 $helpBad = @()
-foreach ($hn in 'Tenant', 'Admin365', 'Cloudiway', 'Workloads', 'ProjectId') {
+foreach ($hn in 'Mode', 'Tenant', 'Admin365', 'Cloudiway', 'Workloads', 'ProjectId') {
     $ht = ''
     try { $ht = ((Get-Help $main -Parameter $hn -ErrorAction Stop).description | ForEach-Object Text) -join ' ' } catch { $ht = "ERREUR $($_.Exception.Message)" }
     if ($ht -notmatch '(?i)demande si absent') { $helpBad += $hn }
 }
-T 30 'Get-Help : -Tenant, -Admin365, -Cloudiway, -Workloads, -ProjectId indiquent "demande si absent"' ($helpBad.Count -eq 0) ("sans mention : " + ($helpBad -join ', '))
+T 30 'Get-Help : -Mode, -Tenant, -Admin365, -Cloudiway, -Workloads, -ProjectId indiquent "demande si absent"' ($helpBad.Count -eq 0) ("sans mention : " + ($helpBad -join ', '))
 $helpFull = ''
 try { $helpFull = (Get-Help $main -Full -ErrorAction Stop | Out-String) } catch { $helpFull = '' }
-T 32 'Get-Help -Full : -KeepCredentials documente (renouvelle a chaque execution), -RotateCredentials sans effet, mention des jobs de migration actifs' ($helpFull -match '-KeepCredentials' -and $helpFull -match '(?i)CHAQUE execution' -and $helpFull -match '(?i)Sans effet' -and $helpFull -match '(?i)jobs de migration') 'aide du nouveau parametre absente'
+T 32 'Get-Help -Full : -KeepCredentials documente (renouvelle a chaque execution), -RotateCredentials sans effet, mention des jobs de migration actifs' ($helpFull -match '-KeepCredentials' -and $helpFull -match '(?i)CHAQUE execution' -and $helpFull -match '(?i)Sans effet depuis la version 2\.3' -and $helpFull -match '(?i)jobs de migration') 'aide du nouveau parametre absente'
 T 30 'Get-Help -Full : correct (synopsis, exemple de commande complete avec -ProjectId 12345, commande minimale sans parametre, 14+ parametres documentes)' ($helpFull.Length -gt 3000 -and $helpFull -match '-ProjectId 12345' -and $helpFull -match 'Commande minimale' -and $helpFull -match 'Commande complete' -and (@('Mode', 'Tenant', 'Admin365', 'Cloudiway', 'CloudiwayPat', 'ProjectId', 'Workloads', 'AuthMethod', 'ValidityDays', 'RotateCredentials', 'AdoptExisting', 'OutDir', 'SkipCloudiway', 'Discover') | Where-Object { $helpFull -notmatch ('-' + $_ + ' ') }).Count -eq 0) "longueur=$($helpFull.Length)"
 
 if ([Console]::IsInputRedirected) {
@@ -1241,7 +1404,7 @@ if ([Console]::IsInputRedirected) {
 } else {
     # Chaque parametre manquant, un a un : exactement UNE question (plus le mot de passe masque), puis execution complete
     $oneByOne = @(
-        @{ Drop = 'Tenant'; Answer = 'contoso.onmicrosoft.com' }, @{ Drop = 'Admin365'; Answer = $global:MockUser },
+        @{ Drop = 'Mode'; Answer = '1' }, @{ Drop = 'Tenant'; Answer = 'contoso.onmicrosoft.com' }, @{ Drop = 'Admin365'; Answer = $global:MockUser },
         @{ Drop = 'Workloads'; Answer = '1' }, @{ Drop = 'Cloudiway'; Answer = $global:MockCwLogin }
     )
     foreach ($c in $oneByOne) {
@@ -1256,12 +1419,12 @@ if ([Console]::IsInputRedirected) {
     # Tout manque + saisies invalides puis valides (re-question, pas d'arret brutal) + exemples affiches
     Reset-MockState
     $b30a = New-Base 'Q-ALL'; $allBases.Add($b30a)
-    $q30 = @('pas-un-domaine', 'contoso.onmicrosoft.com', 'pasunemail', $global:MockUser, '99', 'foo', '1', 'x', $global:MockCwLogin, 'o', $global:MockCwPassword, 'o')
+    $q30 = @('abc', '9', '1', 'pas-un-domaine', 'contoso.onmicrosoft.com', 'pasunemail', $global:MockUser, '99', 'foo', '1', 'x', $global:MockCwLogin, 'o', $global:MockCwPassword, 'o')
     $r30a = Invoke-Connector @{ OutDir = $b30a } $b30a $q30
     $invalidCount = ([regex]::Matches($r30a.Console, 'Saisie non valide|Saisie non reconnue')).Count
     T 30 'interactif, tout manque : saisies invalides (mode, tenant, compte, charges, Cloudiway) puis valides : re-questions, pas d''arret brutal, exit 0, file consommee' ($r30a.Exit -eq 0 -and $r30a.QueueLeft -eq 0 -and -not $global:MockReadExhausted -and $invalidCount -ge 5 -and (Get-MockConnector $ConnSrc)) "exit=$($r30a.Exit) invalides=$invalidCount restant=$($r30a.QueueLeft) $($r30a.Crash)"
     $prompts30 = $global:MockReadLog -join "`n"
-    T 30 'interactif : chaque question donne un exemple (mode, tenant, compte, charges, Cloudiway)' ($prompts30 -match 'exemple : contoso\.onmicrosoft\.com' -and $prompts30 -match 'admin365@contoso\.com' -and $prompts30 -match 'exemple : paul\.bernard@contoso\.com' -and $r30a.Console -match 'ex\. 1,2 ou Mail,OneDrive') 'exemple absent'
+    T 30 'interactif : chaque question donne un exemple (mode, tenant, compte, charges, Cloudiway)' ($r30a.Console -match 'exemple de reponse : 1 pour Source' -and $prompts30 -match 'exemple : contoso\.onmicrosoft\.com' -and $prompts30 -match 'admin365@contoso\.com' -and $prompts30 -match 'exemple : paul\.bernard@contoso\.com' -and $r30a.Console -match 'ex\. 1,2 ou Mail,OneDrive') 'exemple absent'
     $allConsoles.Add(($global:MockReadLog -join "`n"))
     # Projet : plusieurs visibles -> liste, re-question sur saisie invalide
     Reset-MockState; $global:MockCiw.Projects = @(12345, 12346)
@@ -1302,11 +1465,11 @@ function Get-ReportNsTitles([string]$Md, [string]$Group) {
 }
 function Get-ExoAppIdOf([string]$AppName) { "$((@(Get-MockApp $AppName)[0]).appId)" }
 
-# --- V1 : Source Mail + OneDrive, liste EwsAllowedAppIDs deja renseignee (autre application) ---
+# --- V1 : Source Mail + OneDrive + SharePoint, liste EwsAllowedAppIDs deja renseignee (autre application) ---
 Reset-MockState
 $global:MockOpts.EwsList = @('0000aaaa-0000-0000-0000-00000000dddd')
 $baseV1 = New-Base 'V1'; $allBases.Add($baseV1)
-$pV1 = Get-BaseParams $baseV1 @('Mail', 'OneDrive'); $pV1['ProductIds'] = '5,6'
+$pV1 = Get-BaseParams $baseV1 @('Mail', 'OneDrive', 'SharePoint'); $pV1['ProductIds'] = '5,6,7'
 $rV1 = Invoke-Connector $pV1 $baseV1
 $mdV1 = Read-RunFile $rV1 'Rapport-*.md'
 $appV1 = Get-ExoAppIdOf $AppSrc
@@ -1329,20 +1492,21 @@ T 31 'Prochaines actions : plus de section « Prochaines actions » (ni console,
 T 31 'Prochaines actions : aucune ligne sans action (pas de « Consentement administrateur : deja accorde » ni « Rien a faire. »)' ($rV1.Console -notmatch 'Consentement administrateur : deja accorde' -and $mdV1 -notmatch 'Consentement administrateur : deja accorde' -and $mdV1 -notmatch '(?m)^\d+\. \*\*.*\*\* - Rien a faire' -and ($rV1.Console -split "\r?\n" | Where-Object { $_ -match '^\s+\d+\. ' -and $_ -match 'deja accorde' }).Count -eq 0) 'ligne sans action presente'
 T 31 'Prochaines actions : console et rapport strictement coherents (memes titres, meme ordre, dans « A faire » et « A verifier »)' ($cChk.Count -gt 0 -and (($cTodo -join '|') -eq ($rTodo -join '|')) -and (($cChk -join '|') -eq ($rChk -join '|'))) "console faire=[$($cTodo -join '|')] verifier=[$($cChk -join '|')] ; rapport faire=[$($rTodo -join '|')] verifier=[$($rChk -join '|')]"
 T 31 '« A faire » : vide quand tout est applique (aucune licence, aucun MFA, aucun renouvellement a faire)' ($rTodo.Count -eq 0 -and $cTodo.Count -eq 0) "faire=$($rTodo -join '|')"
-T 31 '« A verifier » : aucune mention MFA / acces conditionnel (pas de compte de service)' (($rChk -join '|') -notmatch 'MFA') "verifier=$($rChk -join '|')"
+T 31 '« A verifier » : MFA / acces conditionnel du compte de service (information), l''outil ne le modifie pas' (($rChk -join '|') -match 'MFA / acces conditionnel' -and $mdV1 -match 'ne devine pas la politique' -and $mdV1 -match 'ne la modifie jamais') "verifier=$($rChk -join '|')"
 $mkV1 = Get-MockMarker (Get-MockConnector $ConnSrc)
 $nV1 = ([datetime]::ParseExact($mkV1.Date, 'yyyyMMdd', [System.Globalization.CultureInfo]::InvariantCulture).Date - [datetime]::UtcNow.Date).Days
 T 31 'Renouvellement : simple information, N jours calcule sur l''expiration reelle du certificat transmis (pas de « 5 mois » en dur)' ($mdV1 -match ("Le certificat du connecteur expire le \d\d/\d\d/\d{4} \(dans $nV1 jours\)\. Chaque relance de l'outil renouvelle le certificat") -and $mdV1 -notmatch '5 mois|environ \d+ mois|Relancer la meme commande dans') "N attendu=$nV1"
+T 31 'Renouvellement (v2.3) : phrase explicite sur le compte de service (n''expire pas, mais chaque relance reinitialise son mot de passe et le renvoie au connecteur) ; plus aucune consigne « relancer avant l''echeance »' ($mdV1 -match 'Le compte de service n''expire pas \(mot de passe sans expiration\), mais chaque relance reinitialise aussi son mot de passe et le renvoie au connecteur' -and $mdV1 -notmatch 'pour rester a jour') 'phrase absente'
 T 31 'Renouvellement : aucune mention « les anciens ne sont pas supprimes »' ($mdV1 -notmatch 'anciens[^.]{0,40}(ne sont pas|pas) supprim' -and $rV1.Console -notmatch 'anciens[^.]{0,40}(ne sont pas|pas) supprim') 'mention presente'
 T 31 'Renouvellement : l''information s''affiche aussi dans la console avec le meme N' ($rV1.Console -match "dans $nV1 jours") "N=$nV1"
-T 31 '« Valeurs a connaitre » : presente quand elle contient des valeurs (AppID reel, expiration)' ($mdV1 -match '## Valeurs a connaitre' -and $mdV1 -match [regex]::Escape("AppID de l'application : ``$appV1``") -and $mdV1 -match 'Expiration du certificat du connecteur : \d{4}-\d\d-\d\d') 'section ou valeurs absentes'
+T 31 '« Valeurs a connaitre » : presente quand elle contient des valeurs (AppID reel, compte de service, expiration)' ($mdV1 -match '## Valeurs a connaitre' -and $mdV1 -match [regex]::Escape("AppID de l'application : ``$appV1``") -and $mdV1 -match 'ServiceAccountUpn' -and $mdV1 -match 'Expiration du certificat du connecteur : \d{4}-\d\d-\d\d') 'section ou valeurs absentes'
 T 31 '« Valeurs a connaitre » : plus de consigne manuelle « a inscrire dans EwsAllowedAppIDs »' ($mdV1 -notmatch 'a inscrire dans EwsAllowedAppIDs') 'consigne presente'
 
 # --- V1 : version, affichage ---
-T 31 'Version 2.4 (31/10/2026) dans la banniere console et dans le rapport, jamais « 2.0 »' ($rV1.Console -match 'version 2\.4 - 31/10/2026' -and $mdV1 -match 'version 2\.4 \(31/10/2026\)' -and $rV1.Console -notmatch 'version 2\.0' -and $mdV1 -notmatch 'version 2\.0') 'version'
+T 31 'Version 2.7 (04/11/2026) dans la banniere console et dans le rapport, jamais « 2.0 »' ($rV1.Console -match 'version 2\.7 - 04/11/2026' -and $mdV1 -match 'version 2\.7 \(04/11/2026\)' -and $rV1.Console -notmatch 'version 2\.0' -and $mdV1 -notmatch 'version 2\.0') 'version'
 $verBad = [System.Collections.Generic.List[string]]::new()
-foreach ($vf in 'cloudiway-connector.ps1', 'lib\common.ps1', 'lib\ui.ps1') { $vt = [System.IO.File]::ReadAllText((Join-Path $pkg $vf)); if ($vt -notmatch "AppVersion(?: = |' ')'?2\.4'" -and $vt -notmatch "'AppVersion' '2\.4'") { $verBad.Add($vf) } }
-T 31 'Coherence de version : 2.4 dans common.ps1, script principal, ui.ps1 (defaut)' ($verBad.Count -eq 0) ($verBad -join ', ')
+foreach ($vf in 'cloudiway-connector.ps1', 'lib\common.ps1', 'lib\ui.ps1') { $vt = [System.IO.File]::ReadAllText((Join-Path $pkg $vf)); if ($vt -notmatch "AppVersion(?: = |' ')'?2\.7'" -and $vt -notmatch "'AppVersion' '2\.7'") { $verBad.Add($vf) } }
+T 31 'Coherence de version : 2.7 dans common.ps1, script principal, ui.ps1 (defaut)' ($verBad.Count -eq 0) ($verBad -join ', ')
 T 31 'Affichage : aucun tableau parasite « Name Status Detail » en fin d''execution, ni « Connecteur Cloudiway existant » dans la console' ($rV1.Console -notmatch '(?m)^\s*Name\s+Status\s+Detail' -and $rV1.Console -notmatch 'Connecteur Cloudiway existant') 'tableau parasite'
 T 31 'Affichage : la lecture du connecteur existant reste tracee dans run.log (rien de perdu)' ((Read-RunFile $rV1 'run.log') -match 'CONNECTEUR Connecteur Cloudiway existant') 'trace absente'
 T 31 'Affichage : les rapports s''ouvrent sur Prochaines actions sans table parasite apres le bloc (fin de console = A verifier / A faire)' (($rV1.Console.TrimEnd() -split "\r?\n" | Select-Object -Last 1) -notmatch 'Name\s+Status|----') 'derniere ligne'
@@ -1480,6 +1644,13 @@ $global:MockOpts.ExoSetFails = $false
 $rV12b = Invoke-Connector (Get-BaseParams $baseV12 @('Mail')) $baseV12
 T 31 'Reprise apres echec d''ecriture : le meme appel ajoute l''AppID (liste = 2 entrees), exit 0' ($rV12b.Exit -eq 0 -and @($global:MockOpts.EwsList).Count -eq 2) "exit=$($rV12b.Exit) liste=$(@($global:MockOpts.EwsList).Count)"
 
+# --- V13 : Cible, -UseDeviceCode, interruption ---
+Reset-MockState
+$global:MockOpts.EwsList = @('0000aaaa-0000-0000-0000-00000000dddd')
+$baseV13 = New-Base 'V13'; $allBases.Add($baseV13)
+$rV13 = Invoke-Connector (Get-BaseParams $baseV13 @('Mail') 'Target') $baseV13
+T 31 'Exchange en CIBLE (Mail) : UN Set @{Add=<AppID de l''application CLOUDIWAY-TARGET>}, exit 0' ($rV13.Exit -eq 0 -and (Get-ExoSets $rV13).Count -eq 1 -and (Get-ExoSets $rV13)[0].Body -eq "Add=$(Get-ExoAppIdOf $AppTgt)") "exit=$($rV13.Exit) sets=$((Get-ExoSets $rV13).Count)"
+Reset-MockState
 Reset-MockState
 $baseV15 = New-Base 'V15'; $allBases.Add($baseV15)
 $pV15 = Get-BaseParams $baseV15 @('Mail'); $pV15['WhatIf'] = $true; $pV15['UseDeviceCode'] = $true
@@ -1487,6 +1658,7 @@ $rV15 = Invoke-Connector $pV15 $baseV15
 T 31 '-UseDeviceCode : Connect-ExchangeOnline recoit -Device (code d''appareil)' (@($rV15.Calls | Where-Object { $_.Method -eq 'CONNECT-EXO' -and $_.Body -match 'device=1' }).Count -eq 1) 'device absent'
 $baseV15n = New-Base 'V15n'; $allBases.Add($baseV15n)
 $pV15n = Get-BaseParams $baseV15n @('Mail'); $pV15n['WhatIf'] = $true
+$global:MockExoCtx = $null   # v2.5 : nouvelle console (une session du meme tenant et du meme compte deja ouverte serait reutilisee, sans nouvelle connexion)
 $rV15n = Invoke-Connector $pV15n $baseV15n
 T 31 'Sans -UseDeviceCode : connexion Exchange interactive normale (pas de -Device)' (@($rV15n.Calls | Where-Object { $_.Method -eq 'CONNECT-EXO' -and $_.Body -notmatch 'device=1' }).Count -eq 1) 'device present'
 Reset-MockState
@@ -1540,15 +1712,15 @@ T 31 'Get-Help -Full : Exchange Online decrit (connexion, lecture seule, ajout s
 # POINT 32 (v2.3) : retrait des certificats par removeKey (preuve de possession) ET renouvellement PAR DEFAUT (-KeepCredentials)
 # ===================================================================================================
 # --- 32a : deux passages consecutifs SANS option = deux renouvellements (Cible Mail+OneDrive, compte de service) ---
-$w1 = New-SourceMailOd 'W1'
-$thumbW0 = @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])); $oldIdW = "$(@((@(Get-MockApp $AppSrc)[0]).keyCredentials)[0].keyId)"
-$putW0 = $global:MockCiw.PutCount; $rkW0 = $global:MockTenant.RemovedKeys; $tokW0 = $global:MockTenant.ProofTokens.Count
+$w1 = New-TargetOneDrive 'W1'
+$thumbW0 = @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])); $oldIdW = "$(@((@(Get-MockApp $AppTgt)[0]).keyCredentials)[0].keyId)"
+$pwW0 = (Get-MockUser $SvcTgt).PwdMarker; $putW0 = $global:MockCiw.PutCount; $rkW0 = $global:MockTenant.RemovedKeys; $tokW0 = $global:MockTenant.ProofTokens.Count
 $rW2 = Invoke-Connector $w1.Params $w1.Base
 $repW2 = Read-RunFile $rW2 'Rapport-*.md'; $logW2 = Read-RunFile $rW2 'run.log'   # lus AVANT le passage suivant (meme minute = meme nom de dossier)
-$thumbW2 = @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])); 
+$thumbW2 = @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])); $pwW2 = (Get-MockUser $SvcTgt).PwdMarker
 $rW3 = Invoke-Connector $w1.Params $w1.Base
-$thumbW3 = @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])); 
-T 32 'defaut : deux passages consecutifs sans option = deux renouvellements (exit 0, un seul certificat actif a la fin, connecteur mis a jour deux fois, connecteur coherent)' ($w1.Run.Exit -eq 0 -and $rW2.Exit -eq 0 -and $rW3.Exit -eq 0 -and $thumbW2.Count -eq 1 -and $thumbW3.Count -eq 1 -and $thumbW2[0] -ne $thumbW0[0] -and $thumbW3[0] -ne $thumbW2[0] -and $global:MockCiw.PutCount -eq $putW0 + 2 -and $global:MockTenant.RemovedKeys -eq $rkW0 + 2 -and (Test-ConnCoherence $ConnSrc $AppSrc) -eq '') "exit=$($rW2.Exit)/$($rW3.Exit) certs=$($thumbW2.Count)/$($thumbW3.Count) PUT=$($global:MockCiw.PutCount - $putW0) retirees=$($global:MockTenant.RemovedKeys - $rkW0) incoherence=$(Test-ConnCoherence $ConnSrc $AppSrc)"
+$thumbW3 = @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])); $pwW3 = (Get-MockUser $SvcTgt).PwdMarker
+T 32 'defaut : deux passages consecutifs sans option = deux renouvellements (exit 0, un seul certificat actif a la fin, connecteur mis a jour deux fois, mot de passe du compte change a chaque passage, connecteur coherent)' ($w1.Run.Exit -eq 0 -and $rW2.Exit -eq 0 -and $rW3.Exit -eq 0 -and $thumbW2.Count -eq 1 -and $thumbW3.Count -eq 1 -and $thumbW2[0] -ne $thumbW0[0] -and $thumbW3[0] -ne $thumbW2[0] -and $global:MockCiw.PutCount -eq $putW0 + 2 -and $pwW2 -ne $pwW0 -and $pwW3 -ne $pwW2 -and $global:MockTenant.RemovedKeys -eq $rkW0 + 2 -and (Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) -eq '') "exit=$($rW2.Exit)/$($rW3.Exit) certs=$($thumbW2.Count)/$($thumbW3.Count) PUT=$($global:MockCiw.PutCount - $putW0) retirees=$($global:MockTenant.RemovedKeys - $rkW0) incoherence=$(Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt)"
 $mutW2 = @($rW2.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.IsWrite -and $_.Status -eq 'OK' })
 T 32 'removeKey : l''ancien certificat est retire par POST /applications/{id}/removeKey (1 appel), le PATCH keyCredentials ne sert qu''a l''ajout (une entree avec key), aucun PATCH de retrait' (@($mutW2 | Where-Object { $_.Method -eq 'POST' -and $_.Path -match '^/applications/[^/]+/removeKey$' }).Count -eq 1 -and @($mutW2 | Where-Object { $_.Method -eq 'PATCH' -and $_.Body -match 'keyCredentials' }).Count -eq 1 -and @($mutW2 | Where-Object { $_.Method -eq 'PATCH' -and $_.Body -match 'keyCredentials' -and $_.Body -notmatch '"key"\s*:\s*"' }).Count -eq 0 -and $global:MockTenant.RemovedKeyIds -contains $oldIdW) "retraits=$(@($mutW2 | Where-Object { $_.Path -match 'removeKey$' }).Count)"
 T 32 'removeKey : le mock a recu et valide un jeton de preuve par retrait (2 jetons sur les deux passages)' ($global:MockTenant.ProofTokens.Count -eq $tokW0 + 2) "jetons=$($global:MockTenant.ProofTokens.Count - $tokW0)"
@@ -1564,7 +1736,7 @@ if ($conW2 -notmatch 'mot de passe du compte de service') { $chkW2.Add('mention 
 if (@($repW2, $logW2, $rW2.Console | Where-Object { $_ -match '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}' }).Count -gt 0) { $chkW2.Add('JWT detecte') }
 if (@($global:MockTenant.ProofTokens | Where-Object { $repW2.Contains($_) -or $logW2.Contains($_) -or $rW2.Console.Contains($_) }).Count -gt 0) { $chkW2.Add('jeton de preuve present') }
 T 32 'rapport et journal : keyId et empreinte de la cle retiree, raison « renouvellement a chaque execution », avertissement « connecteur existant mis a jour », JAMAIS le jeton de preuve (ni aucun JWT) dans la console, le rapport ou le journal' ($chkW2.Count -eq 0) ($chkW2 -join ' ; ')
-T 32 'prochaines actions : l''expiration reste une information (« A verifier »), plus de consigne « relancer avant l''echeance », precise que chaque relance renouvelle le certificat' ($repW2 -match 'Chaque relance de l''outil renouvelle le certificat' -and $repW2 -notmatch '(?i)pour rester a jour|avant l''echeance') 'texte de renouvellement'
+T 32 'prochaines actions : l''expiration reste une information (« A verifier »), plus de consigne « relancer avant l''echeance », precise que chaque relance renouvelle certificat et mot de passe du compte de service' ($repW2 -match 'Chaque relance de l''outil renouvelle le certificat' -and $repW2 -match 'chaque relance reinitialise aussi son mot de passe' -and $repW2 -notmatch '(?i)pour rester a jour|avant l''echeance') 'texte de renouvellement'
 # --- 32b : -KeepCredentials = zero ecriture ; -WhatIf n'ecrit rien ; -KeepCredentials + -RotateCredentials = erreur ---
 $putW4 = $global:MockCiw.PutCount; $rkW4 = $global:MockTenant.RemovedKeys
 $rW4 = Invoke-Connector (Keep $w1.Params) $w1.Base
@@ -1573,7 +1745,7 @@ $pWw = $w1.Params.Clone(); $pWw['WhatIf'] = $true
 $rkW5 = $global:MockTenant.RemovedKeys
 $rW5 = Invoke-Connector $pWw $w1.Base
 $clW5 = @(Get-PlanRows $rW5 | Where-Object { $_.Zone -eq 'Nettoyage' })
-T 32 '-WhatIf (defaut = renouvellement) : n''ecrit rien (zero ecriture Graph et Cloudiway, aucun retrait, un seul certificat), le plan annonce le renouvellement et le nettoyage' ($rW5.Exit -eq 0 -and $rW5.GraphWrites -eq 0 -and $rW5.CiwWrites -eq 0 -and $global:MockTenant.RemovedKeys -eq $rkW5 -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq 1 -and $clW5.Count -eq 1 -and $clW5[0].Action -eq 'METTRE A JOUR' -and @(Get-PlanRows $rW5 | Where-Object { $_.Raison -match 'renouvellement a chaque execution' }).Count -ge 1) "exit=$($rW5.Exit) $(Get-WriteBrief $rW5.Calls) nettoyage=$($clW5.Count)"
+T 32 '-WhatIf (defaut = renouvellement) : n''ecrit rien (zero ecriture Graph et Cloudiway, aucun retrait, un seul certificat), le plan annonce le renouvellement et le nettoyage' ($rW5.Exit -eq 0 -and $rW5.GraphWrites -eq 0 -and $rW5.CiwWrites -eq 0 -and $global:MockTenant.RemovedKeys -eq $rkW5 -and @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count -eq 1 -and $clW5.Count -eq 1 -and $clW5[0].Action -eq 'METTRE A JOUR' -and @(Get-PlanRows $rW5 | Where-Object { $_.Raison -match 'renouvellement a chaque execution' }).Count -ge 1) "exit=$($rW5.Exit) $(Get-WriteBrief $rW5.Calls) nettoyage=$($clW5.Count)"
 $pBoth = Keep $w1.Params; $pBoth['RotateCredentials'] = $true
 $rW6 = Invoke-Connector $pBoth $w1.Base
 T 32 '-KeepCredentials + -RotateCredentials : erreur claire, exit 1, avant toute connexion (aucun appel Graph ni Cloudiway)' ($rW6.Exit -eq 1 -and $rW6.Console -match 'Options incompatibles : -KeepCredentials et -RotateCredentials' -and $rW6.GraphCalls -eq 0 -and $rW6.CiwWrites -eq 0 -and $rW6.Connects -eq 0) "exit=$($rW6.Exit) graph=$($rW6.GraphCalls)"
@@ -1716,7 +1888,7 @@ function Get-MockSleepCount([int]$Seconds) { @($global:MockSleeps | Where-Object
 # --- 33a : creation, renouvellement sur place, second passage, connecteur anterieur ---
 Reset-MockState
 $b33a = New-Base 'Z1'; $allBases.Add($b33a)
-$p33a = Get-BaseParams $b33a @('Mail', 'OneDrive'); $p33a['ProductIds'] = '5,6'
+$p33a = Get-BaseParams $b33a @('Mail', 'OneDrive', 'SharePoint'); $p33a['ProductIds'] = '5,6,7'
 $z1 = Invoke-Connector $p33a $b33a
 $cZ1 = Get-MockConnector $ConnSrc; $certZ1 = Get-ConnCert $cZ1; $fnZ1 = "$($cZ1.connectorCertificate.fileName)"; $extZ1 = "$($cZ1.externalKey)"; $idCertZ1 = $cZ1.connectorCertificate.id
 $repZ1 = Read-RunFile $z1 'Rapport-*.md'
@@ -1727,7 +1899,7 @@ $z2 = Invoke-Connector $p33a $b33a
 $cZ2 = Get-MockConnector $ConnSrc; $certZ2 = Get-ConnCert $cZ2; $fnZ2 = "$($cZ2.connectorCertificate.fileName)"
 $repZ2 = Read-RunFile $z2 'Rapport-*.md'
 T 33 'renouvellement (PUT) : le certificat est remplace SUR PLACE (meme id), le fileName devient le nouveau marqueur, l''externalKey de creation reste INCHANGEE' ($z2.Exit -eq 0 -and $cZ2.connectorCertificate.id -eq $idCertZ1 -and $fnZ2 -ne $fnZ1 -and $fnZ2 -ceq ('CIW1_' + $certZ2.Thumbprint.Substring(0, 32) + '_' + $certZ2.NotAfter.ToString('yyyyMMdd') + '.pfx') -and "$($cZ2.externalKey)" -ceq $extZ1) "exit=$($z2.Exit) id=$idCertZ1->$($cZ2.connectorCertificate.id) fileName=$fnZ2 externalKey=$($cZ2.externalKey)"
-T 33 'renouvellement : relecture apres le PUT = ecriture CONFIRMEE : anciens certificats retires (1 seul), verification « certificat » Conforme' ($z2.Exit -eq 0 -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq 1 -and (Test-ConnCoherence $ConnSrc $AppSrc) -eq '' -and $repZ2 -match 'Connecteur Cloudiway : certificat \| Conforme') "incoherence=$(Test-ConnCoherence $ConnSrc $AppSrc)"
+T 33 'renouvellement : relecture apres le PUT = ecriture CONFIRMEE : mot de passe du compte reinitialise ET anciens certificats retires (1 seul), verification « certificat » Conforme' ($z2.Exit -eq 0 -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq 1 -and (Test-ConnCoherence $ConnSrc $AppSrc $SvcSrc) -eq '' -and $repZ2 -match 'Connecteur Cloudiway : certificat \| Conforme') "incoherence=$(Test-ConnCoherence $ConnSrc $AppSrc $SvcSrc)"
 $z3 = Invoke-Connector (Keep $p33a) $b33a
 $repZ3 = Read-RunFile $z3 'Rapport-*.md'
 T 33 'marqueur par fileName, -KeepCredentials : marqueur coherent (empreinte de l''application, valide > 30 jours) = RIEN a faire (zero ecriture, exit 0), expiration affichee lue dans le fileName' ($z3.Exit -eq 0 -and $z3.GraphWrites -eq 0 -and $z3.CiwWrites -eq 0 -and $repZ3 -match [regex]::Escape('Expiration des identifiants du connecteur : ' + $certZ2.NotAfter.ToString('dd/MM/yyyy', [System.Globalization.CultureInfo]::InvariantCulture))) "exit=$($z3.Exit) graph=$($z3.GraphWrites) ciw=$($z3.CiwWrites) attendu=$($certZ2.NotAfter.ToString('dd/MM/yyyy', [System.Globalization.CultureInfo]::InvariantCulture)) rapport=$(($repZ3 -split "`n" | Where-Object { $_ -match 'Expiration' } | Select-Object -First 2) -join ' // ') len=$($repZ3.Length)"
@@ -1739,29 +1911,30 @@ $repZ4 = Read-RunFile $z4 'Rapport-*.md'
 T 33 'connecteur anterieur (fileName cloudiway.pfx + externalKey CIW1|..|..) : marqueur lu dans l''externalKey, -KeepCredentials = zero ecriture, exit 0, expiration affichee' ($z4.Exit -eq 0 -and $z4.GraphWrites -eq 0 -and $z4.CiwWrites -eq 0 -and $repZ4 -match [regex]::Escape('Expiration des identifiants du connecteur : ' + $certZ2.NotAfter.ToString('dd/MM/yyyy', [System.Globalization.CultureInfo]::InvariantCulture))) "exit=$($z4.Exit) graph=$($z4.GraphWrites) ciw=$($z4.CiwWrites)"
 $cZ3.connectorCertificate.fileName = 'cloudiway.pfx'; $cZ3.externalKey = 'CIW1|' + ('CD' * 16) + '|20270101'
 $z5 = Invoke-Connector (Keep $p33a) $b33a
-T 33 'connecteur anterieur dont l''empreinte (externalKey) est INCONNUE de l''application : renouvellement, le fileName devient le marqueur CIW1_..., connecteur coherent, exit 0' ($z5.Exit -eq 0 -and (Get-MockConnectorFile $ConnSrc) -cmatch '^CIW1_[0-9A-F]{32}_\d{8}\.pfx$' -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq 1 -and (Test-ConnCoherence $ConnSrc $AppSrc) -eq '') "exit=$($z5.Exit) fileName=$(Get-MockConnectorFile $ConnSrc)"
+T 33 'connecteur anterieur dont l''empreinte (externalKey) est INCONNUE de l''application : renouvellement, le fileName devient le marqueur CIW1_..., connecteur coherent, exit 0' ($z5.Exit -eq 0 -and (Get-MockConnectorFile $ConnSrc) -cmatch '^CIW1_[0-9A-F]{32}_\d{8}\.pfx$' -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq 1 -and (Test-ConnCoherence $ConnSrc $AppSrc $SvcSrc) -eq '') "exit=$($z5.Exit) fileName=$(Get-MockConnectorFile $ConnSrc)"
 
 # --- 33b : B1 - le portail repond « succes » mais n'a pas pris le certificat (PUT ignore le certificat) ---
-$x2 = New-SourceMailOd 'Z2'
-$cX2 = Get-MockConnector $ConnSrc; $fnX2 = "$($cX2.connectorCertificate.fileName)"; $idX2 = $cX2.connectorCertificate.id; $rkX2 = $global:MockTenant.RemovedKeys; $tokX2 = $global:MockTenant.ProofTokens.Count
+$x2 = New-TargetOneDrive 'Z2'
+$cX2 = Get-MockConnector $ConnTgt; $fnX2 = "$($cX2.connectorCertificate.fileName)"; $idX2 = $cX2.connectorCertificate.id; $pwX2 = (Get-MockUser $SvcTgt).PwdMarker; $rkX2 = $global:MockTenant.RemovedKeys; $tokX2 = $global:MockTenant.ProofTokens.Count
 $global:MockOpts.CiwPutIgnoresCert = $true
 $rX2 = Invoke-Connector $x2.Params $x2.Base
 $global:MockOpts.CiwPutIgnoresCert = $false
 $repX2 = Read-RunFile $rX2 'Rapport-*.md'
-T 33 'B1 : PUT annonce reussi (isSuccess) mais fileName inchange : ECHEC « le portail n''a pas pris en compte le nouveau certificat », ConnectorWriteOk faux, code de sortie 2' ($rX2.Exit -eq 2 -and $rX2.Console -match 'le portail n''a pas pris en compte le nouveau certificat' -and (Get-MockConnectorFile $ConnSrc) -ceq $fnX2) "exit=$($rX2.Exit) fileName=$(Get-MockConnectorFile $ConnSrc)"
-T 33 'B1 : AUCUN retrait (aucun removeKey, aucun jeton de preuve, ancien certificat conserve = 2 certificats dans l''application)' ($global:MockTenant.RemovedKeys -eq $rkX2 -and $global:MockTenant.ProofTokens.Count -eq $tokX2 -and @($rX2.Calls | Where-Object { $_.Path -match 'removeKey$' }).Count -eq 0 -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq 2) "retirees=$($global:MockTenant.RemovedKeys - $rkX2) certs=$(@(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count)"
-T 33 'B1 : ligne « Nettoyage » IGNOREE (dependance de la ligne Cloudiway), message actionnable (relancer), verification « certificat » NON CONFORME' ($repX2 -match 'Nettoyage \| Anciens certificats de l''outil \| IGNORE' -and $repX2 -match 'Relancer l''outil' -and $repX2 -match 'Connecteur Cloudiway : certificat \| NON CONFORME') 'lignes du rapport'
+T 33 'B1 : PUT annonce reussi (isSuccess) mais fileName inchange : ECHEC « le portail n''a pas pris en compte le nouveau certificat », ConnectorWriteOk faux, code de sortie 2' ($rX2.Exit -eq 2 -and $rX2.Console -match 'le portail n''a pas pris en compte le nouveau certificat' -and (Get-MockConnectorFile $ConnTgt) -ceq $fnX2) "exit=$($rX2.Exit) fileName=$(Get-MockConnectorFile $ConnTgt)"
+T 33 'B1 : AUCUN retrait (aucun removeKey, aucun jeton de preuve, ancien certificat conserve = 2 certificats dans l''application)' ($global:MockTenant.RemovedKeys -eq $rkX2 -and $global:MockTenant.ProofTokens.Count -eq $tokX2 -and @($rX2.Calls | Where-Object { $_.Path -match 'removeKey$' }).Count -eq 0 -and @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count -eq 2) "retirees=$($global:MockTenant.RemovedKeys - $rkX2) certs=$(@(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count)"
+T 33 'B1 (v2.5) : le mot de passe du compte est reinitialise AVANT le connecteur (un seul PATCH passwordProfile) : l''echec de confirmation du connecteur annonce « DESYNCHRONISATION POSSIBLE »' ((Get-MockUser $SvcTgt).PwdMarker -ne $pwX2 -and @($rX2.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.Method -eq 'PATCH' -and $_.Path -like '/users/*' -and $_.Body -match 'passwordProfile' }).Count -eq 1 -and $repX2 -match 'DESYNCHRONISATION POSSIBLE') 'mot de passe du compte ou message'
+T 33 'B1 (v2.5) : ligne « Nettoyage » IGNOREE (dependance de la ligne Cloudiway), ligne « Mot de passe » APPLIQUEE avant le connecteur, message actionnable (relancer, resynchronisation du mot de passe), verification « certificat » NON CONFORME' ($repX2 -match 'Nettoyage \| Anciens certificats de l''outil \| IGNORE' -and $repX2 -match 'Mot de passe \|[^\r\n]*\| APPLIQUE' -and $repX2 -match 'Relancer l''outil' -and $repX2 -match 'Connecteur Cloudiway : certificat \| NON CONFORME') 'lignes du rapport'
 $rX2b = Invoke-Connector $x2.Params $x2.Base
-T 33 'B1 : relance (portail corrige) : le connecteur prend le certificat, mot de passe resynchronise, orphelin et ancien retires (1 seul certificat), coherent, exit 0' ($rX2b.Exit -eq 0 -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq 1 -and (Test-ConnCoherence $ConnSrc $AppSrc) -eq '' -and (Get-MockConnectorFile $ConnSrc) -cne $fnX2) "exit=$($rX2b.Exit) incoherence=$(Test-ConnCoherence $ConnSrc $AppSrc)"
+T 33 'B1 : relance (portail corrige) : le connecteur prend le certificat, mot de passe resynchronise, orphelin et ancien retires (1 seul certificat), coherent, exit 0' ($rX2b.Exit -eq 0 -and @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count -eq 1 -and (Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) -eq '' -and (Get-MockConnectorFile $ConnTgt) -cne $fnX2) "exit=$($rX2b.Exit) incoherence=$(Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt)"
 
 # --- 33c : M1 - reponse perdue apres traitement (timeout / 5xx) mais fileName conforme : ecriture CONFIRMEE ---
-$x3 = New-SourceMailOd 'Z3'
-$rkX3 = $global:MockTenant.RemovedKeys; $fnX3 = Get-MockConnectorFile $ConnSrc
+$x3 = New-TargetOneDrive 'Z3'
+$pwX3 = (Get-MockUser $SvcTgt).PwdMarker; $rkX3 = $global:MockTenant.RemovedKeys; $fnX3 = Get-MockConnectorFile $ConnTgt
 $global:MockOpts.CiwLoseResponse = @(@{ Method = 'PUT'; Pattern = '^/Connectors/\d+$'; Times = 1; Code = 504 })
 $rX3 = Invoke-Connector $x3.Params $x3.Base
 $global:MockOpts.CiwLoseResponse = @()
 $repX3 = Read-RunFile $rX3 'Rapport-*.md'
-T 33 'M1 : reponse du PUT perdue (504) mais fileName conforme a la relecture : ecriture CONFIRMEE (exit 0, PUT non rejoue), nettoyage effectue, connecteur coherent' ($rX3.Exit -eq 0 -and @($rX3.Calls | Where-Object { $_.Kind -eq 'Ciw' -and $_.Method -eq 'PUT' }).Count -eq 1 -and $global:MockTenant.RemovedKeys -eq $rkX3 + 1 -and @(Get-MockThumbs (@(Get-MockApp $AppSrc)[0])).Count -eq 1 -and (Get-MockConnectorFile $ConnSrc) -cne $fnX3 -and (Test-ConnCoherence $ConnSrc $AppSrc) -eq '') "exit=$($rX3.Exit) PUT=$(@($rX3.Calls | Where-Object { $_.Method -eq 'PUT' }).Count) retirees=$($global:MockTenant.RemovedKeys - $rkX3) incoherence=$(Test-ConnCoherence $ConnSrc $AppSrc)"
+T 33 'M1 : reponse du PUT perdue (504) mais fileName conforme a la relecture : ecriture CONFIRMEE (exit 0, PUT non rejoue), mot de passe du compte reinitialise ET renvoye, nettoyage effectue, connecteur coherent' ($rX3.Exit -eq 0 -and @($rX3.Calls | Where-Object { $_.Kind -eq 'Ciw' -and $_.Method -eq 'PUT' }).Count -eq 1 -and (Get-MockUser $SvcTgt).PwdMarker -ne $pwX3 -and $global:MockTenant.RemovedKeys -eq $rkX3 + 1 -and @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0])).Count -eq 1 -and (Get-MockConnectorFile $ConnTgt) -cne $fnX3 -and (Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) -eq '') "exit=$($rX3.Exit) PUT=$(@($rX3.Calls | Where-Object { $_.Method -eq 'PUT' }).Count) retirees=$($global:MockTenant.RemovedKeys - $rkX3) incoherence=$(Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt)"
 T 33 'M1 : l''erreur de reponse est signalee dans le rapport (« la relecture confirme le nouveau certificat »)' ($repX3 -match 'la relecture confirme le nouveau certificat') 'information absente'
 Reset-MockState
 $global:MockOpts.CiwLoseResponse = @(@{ Method = 'POST'; Pattern = '^/Connectors$'; Times = 1; Code = 504 })
@@ -1771,21 +1944,21 @@ $global:MockOpts.CiwLoseResponse = @()
 T 33 'M1 : reponse du POST (creation) perdue : connecteur retrouve par son nom, fileName conforme = ecriture confirmee, un seul POST, exit 0, coherent' ($rX3b.Exit -eq 0 -and @($rX3b.Calls | Where-Object { $_.Kind -eq 'Ciw' -and $_.Method -eq 'POST' -and $_.Path -eq '/Connectors' }).Count -eq 1 -and @($global:MockCiw.Connectors).Count -eq 1 -and (Test-ConnCoherence $ConnSrc $AppSrc) -eq '') "exit=$($rX3b.Exit) connecteurs=$(@($global:MockCiw.Connectors).Count) incoherence=$(Test-ConnCoherence $ConnSrc $AppSrc)"
 
 # --- 33d : M2 - relecture impossible / fileName illisible = etat « non verifiable » traite comme NON confirme ---
-$x4 = New-SourceMailOd 'Z4'
-$rkX4 = $global:MockTenant.RemovedKeys
+$x4 = New-TargetOneDrive 'Z4'
+$pwX4 = (Get-MockUser $SvcTgt).PwdMarker; $rkX4 = $global:MockTenant.RemovedKeys
 $global:MockOpts.CiwHideFileName = $true
 $rX4 = Invoke-Connector $x4.Params $x4.Base
 $global:MockOpts.CiwHideFileName = $false
 $repX4 = Read-RunFile $rX4 'Rapport-*.md'
-T 33 'M2 : nom de fichier du certificat illisible apres l''ecriture = « NON verifiable », traite comme NON confirme : exit 2, aucun retrait' ($rX4.Exit -eq 2 -and $rX4.Console -match 'NON verifiable' -and $global:MockTenant.RemovedKeys -eq $rkX4 -and @($rX4.Calls | Where-Object { $_.Path -match 'removeKey$' }).Count -eq 0) "exit=$($rX4.Exit) retirees=$($global:MockTenant.RemovedKeys - $rkX4)"
+T 33 'M2 : nom de fichier du certificat illisible apres l''ecriture = « NON verifiable », traite comme NON confirme : exit 2, aucun retrait (mot de passe deja reinitialise AVANT le connecteur en v2.5)' ($rX4.Exit -eq 2 -and $rX4.Console -match 'NON verifiable' -and $global:MockTenant.RemovedKeys -eq $rkX4 -and (Get-MockUser $SvcTgt).PwdMarker -ne $pwX4 -and @($rX4.Calls | Where-Object { $_.Path -match 'removeKey$' }).Count -eq 0) "exit=$($rX4.Exit) retirees=$($global:MockTenant.RemovedKeys - $rkX4)"
 T 33 'M2 : controle post-ecriture : « certificat » et « marqueur » marques A verifier (WARN), jamais un faux « conforme »' ($repX4 -match 'Connecteur Cloudiway : certificat \| A verifier' -and $repX4 -match 'Connecteur Cloudiway : marqueur \| A verifier') 'lignes WARN absentes'
 # relecture impossible (GET du detail en panne apres l'ecriture) : meme traitement
-$x5 = New-SourceMailOd 'Z5'
-$rkX5 = $global:MockTenant.RemovedKeys; 
+$x5 = New-TargetOneDrive 'Z5'
+$rkX5 = $global:MockTenant.RemovedKeys; $pwX5 = (Get-MockUser $SvcTgt).PwdMarker
 $global:MockOpts.CiwFail = @(@{ Method = 'GET'; Pattern = '^/Connectors/\d+$'; Code = 503; Times = 4; Skip = 3 })   # lectures de l'etape 2, du plan et de l'application passent ; les 4 essais de la relecture echouent
 $rX5 = Invoke-Connector $x5.Params $x5.Base
 $global:MockOpts.CiwFail = @()
-T 33 'M2 : relecture du connecteur IMPOSSIBLE apres l''ecriture (GET en 503) : etat non verifiable = NON confirme (exit 2, aucun retrait)' ($rX5.Exit -eq 2 -and $rX5.Console -match 'NON verifiable' -and $global:MockTenant.RemovedKeys -eq $rkX5) "exit=$($rX5.Exit) retirees=$($global:MockTenant.RemovedKeys - $rkX5)"
+T 33 'M2 : relecture du connecteur IMPOSSIBLE apres l''ecriture (GET en 503) : etat non verifiable = NON confirme (exit 2, aucun retrait ; mot de passe deja reinitialise AVANT le connecteur en v2.5)' ($rX5.Exit -eq 2 -and $rX5.Console -match 'NON verifiable' -and $global:MockTenant.RemovedKeys -eq $rkX5 -and (Get-MockUser $SvcTgt).PwdMarker -ne $pwX5) "exit=$($rX5.Exit) retirees=$($global:MockTenant.RemovedKeys - $rkX5)"
 
 # --- 33e : mutation de controle : sans la verification par fileName, le test B1 (aucun retrait) ECHOUE ---
 $mutDir3 = Join-Path $tmpRoot 'mutation-filename'; New-Item -ItemType Directory -Path $mutDir3 -Force | Out-Null
@@ -1797,7 +1970,7 @@ $okLine = "if (`$fn -ceq `$ExpectedFileName) { `$res.State = 'Confirmed'"
 $nOk = ([regex]::Matches($tC3, [regex]::Escape($okLine))).Count
 [System.IO.File]::WriteAllText($mCiw3, $tC3.Replace($okLine, "if (`$true) { `$res.State = 'Confirmed'"), [System.Text.UTF8Encoding]::new($true))
 T 33 'mutation de controle : la comparaison du fileName relu au nom envoye existe une seule fois dans les sources' ($nOk -eq 1) "occurrences=$nOk"
-$x6 = New-SourceMailOd 'Z6'
+$x6 = New-TargetOneDrive 'Z6'
 $rkX6 = $global:MockTenant.RemovedKeys
 $global:MockOpts.CiwPutIgnoresCert = $true
 $mainSaved3 = $main; $main = $mMain3
@@ -1807,8 +1980,8 @@ $global:MockOpts.CiwPutIgnoresCert = $false
 T 33 'mutation de controle : verification par fileName DESACTIVEE -> l''ancien certificat est retire alors que le portail n''a pas pris le nouveau (le test B1 « aucun retrait » echouerait : mutation detectee)' ($global:MockTenant.RemovedKeys -gt $rkX6) "retirees=$($global:MockTenant.RemovedKeys - $rkX6) exit=$($rMut3.Exit)"
 
 # --- 33f : banc fidele au portail (faits mesures 1 a 7) ---
-$f1 = New-SourceMailOd 'Z7'
-$cF = Get-MockConnector $ConnSrc
+$f1 = New-TargetOneDrive 'Z7'
+$cF = Get-MockConnector $ConnTgt
 $gF = (Invoke-MockCiw GET "/Connectors/$($cF.id)").Result.responseData
 T 33 'banc fidele (fait 1) : le GET renvoie connectorCertificate { id, connectorId, fileName, secret et certificateFile non vides } et poolId / connectorTypeId' ($gF.connectorCertificate.id -gt 0 -and $gF.connectorCertificate.connectorId -eq $cF.id -and $gF.connectorCertificate.fileName -and $gF.connectorCertificate.secret -and $gF.connectorCertificate.certificateFile -and $gF.poolId -eq 3 -and "$($gF.connectorTypeId)" -eq '2') 'forme du GET'
 $certIdF = $gF.connectorCertificate.id
@@ -1829,7 +2002,6 @@ $gF4 = (Invoke-MockCiw GET "/Connectors/$($cF.id)").Result.responseData
 T 33 'banc fidele (fait 5) : un PUT sans poolId / connectorTypeId les remet a 0' ($rF4.Ok -and $gF4.poolId -eq 0 -and "$($gF4.connectorTypeId)" -eq '0') "poolId=$($gF4.poolId) connectorTypeId=$($gF4.connectorTypeId)"
 $extLong = Invoke-MockCiw POST '/Connectors' @{ connectorTypeId = 2; name = 'x-long'; rawsettings = '{}'; rawProductList = '[5]'; externalKey = ('X' * 51) }
 T 33 'banc fidele (fait 6) : externalKey limite a 50 caracteres (51 refuses en HTTP 500 « would be truncated »)' (-not $extLong.Ok -and $extLong.Msg -match 'truncated') "ok=$($extLong.Ok) $($extLong.Msg)"
-Set-MockConnectorSetting $cF 'MigrationAccountPassword' 'seed-pwd-seed'
 $global:MockOpts.CiwMaskSecrets = $true
 $gF5 = (Invoke-MockCiw GET "/Connectors/$($cF.id)").Result.responseData
 $rawF5 = $gF5.rawSettings | ConvertFrom-Json -AsHashtable
@@ -1873,11 +2045,16 @@ T 33 'M3 : Get-JwtAccount se rabat sur unique_name quand upn et preferred_userna
 foreach ($case in @(@{ N = 'admin'; Adopt = $false }, @{ N = 'jdoe@contoso.onmicrosoft.com'; Adopt = $false }, @{ N = 'jdoe'; Adopt = $true }, @{ N = 'Svc-Perso-1'; Adopt = $true })) {
     Reset-MockState
     $b33i = New-Base 'Z9'; $allBases.Add($b33i)
-    $pI = Get-BaseParams $b33i @('Mail'); $pI['ServiceAccountName'] = $case.N; if ($case.Adopt) { $pI['AdoptExisting'] = $true }
+    $pI = Get-BaseParams $b33i @('OneDrive') 'Target'; $pI['ServiceAccountName'] = $case.N; if ($case.Adopt) { $pI['AdoptExisting'] = $true }
     $rI = Invoke-Connector $pI $b33i
     T 33 "M4 : -ServiceAccountName '$($case.N)'$(if ($case.Adopt) { ' + -AdoptExisting' }) refuse (partie locale sans svc-ciw-) : exit 1 avant toute connexion, aucun utilisateur cree" ($rI.Exit -eq 1 -and $rI.Console -match 'svc-ciw-' -and $rI.Calls.Count -eq 0 -and @($global:MockTenant.Users).Count -eq 0) "exit=$($rI.Exit) appels=$($rI.Calls.Count)"
 }
 Reset-MockState
+$b33i2 = New-Base 'Z9b'; $allBases.Add($b33i2)
+$pI2 = Get-BaseParams $b33i2 @('OneDrive') 'Target'; $pI2['ServiceAccountName'] = 'svc-ciw-perso'
+$rI2 = Invoke-Connector $pI2 $b33i2
+T 33 'M4 : -ServiceAccountName svc-ciw-perso accepte : compte svc-ciw-perso@contoso.onmicrosoft.com cree, exit 0' ($rI2.Exit -eq 0 -and (Get-MockUser 'svc-ciw-perso@contoso.onmicrosoft.com')) "exit=$($rI2.Exit) $($rI2.Crash)"
+
 # --- 33j : M5 - removeKey avec reessais (10 / 20 / 30 s) ; cle deja absente = retiree ---
 Reset-MockState
 $b33j = New-Base 'ZA'; $allBases.Add($b33j)
@@ -1931,6 +2108,158 @@ T 33 'm11 : POST oauth2PermissionGrants « already exists » (octroi cree entre-
 $hdrs = @($global:MockGraphHeaders)
 T 33 'm12 : ConsistencyLevel: eventual present sur les lectures (GET) et ABSENT de tout POST / PATCH' (@($hdrs | Where-Object { $_.Method -eq 'GET' -and $_.Consistency -eq 'eventual' }).Count -ge 5 -and @($hdrs | Where-Object { $_.Method -eq 'GET' -and $_.Consistency -ne 'eventual' }).Count -eq 0 -and @($hdrs | Where-Object { $_.Method -ne 'GET' }).Count -ge 5 -and @($hdrs | Where-Object { $_.Method -ne 'GET' -and $_.Consistency }).Count -eq 0) "GET=$(@($hdrs | Where-Object Method -EQ 'GET').Count) ecritures=$(@($hdrs | Where-Object { $_.Method -ne 'GET' }).Count) avec en-tete=$(@($hdrs | Where-Object { $_.Method -ne 'GET' -and $_.Consistency }).Count)"
 
+# ===================================================================================================
+# POINT 34 (v2.5) : retours du premier client reel (2026-11-03) : A session Exchange d'un autre tenant, B commandes manuelles,
+# C valeurs de securite par defaut, D mot de passe du compte de service a la relance (403), E SharePoint / Teams (produit inconnu)
+# ===================================================================================================
+$otherTenant = 'ffffffff-1111-2222-3333-444444444444'
+
+# --- A1 : session Exchange d'un AUTRE tenant ouverte dans la console ---
+Reset-MockState
+$global:MockOpts.ExoPreSession = @{ TenantID = $otherTenant; UserPrincipalName = $global:MockUser }
+$baseW1 = New-Base 'W1'; $allBases.Add($baseW1)
+$pW1 = Get-BaseParams $baseW1 @('Mail'); $pW1['AllowForeignSession'] = $true   # v2.7 : l'ancien comportement « avertissement puis suite » demande -AllowForeignSession (arret net par defaut : point 36 F)
+$rW1 = Invoke-Connector $pW1 $baseW1
+$mdW1 = Read-RunFile $rW1 'Rapport-*.md'
+$exW1 = @(Get-PlanRows $rW1 | Where-Object { $_.Zone -eq 'Exchange' })
+$msgA = '(?i)une session Exchange Online d.un autre tenant est ouverte dans cette console : fermez cette console, ouvrez-en une NOUVELLE pour ce tenant \(une console par tenant\) puis relancez la meme commande'
+$consW1 = ($rW1.Console -replace '\s+', ' ')
+T 34 'A (avec -AllowForeignSession) : session Exchange d''un AUTRE tenant : ni reutilisee, ni nouvelle connexion, ni lecture / ecriture Exchange, ni Disconnect-ExchangeOnline' ((Get-ExoCmdCount $rW1 'CONNECT-EXO') -eq 0 -and (Get-ExoCmdCount $rW1 'DISCONNECT-EXO') -eq 0 -and @($rW1.Calls | Where-Object { $_.Kind -eq 'Exo' }).Count -eq 0) "connect=$(Get-ExoCmdCount $rW1 'CONNECT-EXO') exo=$(@($rW1.Calls | Where-Object { $_.Kind -eq 'Exo' }).Count)"
+T 34 'A : l''etape Exchange devient « A faire » avec le message clair et actionnable (rapport), ligne du plan IGNORE, code de sortie 2' ($rW1.Exit -eq 2 -and $mdW1 -match $msgA -and $exW1.Count -eq 1 -and $exW1[0].Action -eq 'IGNORE') "exit=$($rW1.Exit) ligne=$(Get-PlanBrief $exW1)"
+T 34 'A : le message est aussi dans la console (A faire) et le reste de la configuration continue (application et connecteur crees)' ($consW1 -match $msgA -and (Get-MockApp $AppSrc) -and (Get-MockConnector $ConnSrc)) 'message console ou configuration absente'
+$idxW = $rW1.Console.IndexOf('AUTRE tenant'); $idxP = $rW1.Console.IndexOf('Inventaire et plan')
+T 34 'A : AVERTISSEMENT precoce (section prerequis, avant l''inventaire et toute ecriture) quand une session d''un autre tenant est deja ouverte' ($rW1.Console -match 'AVERTISSEMENT - Session Exchange Online d.un AUTRE tenant' -and $idxW -ge 0 -and $idxP -gt $idxW -and ($rW1.Console -replace '\s+', ' ') -match 'Une console PowerShell par tenant') "idxAvert=$idxW idxPlan=$idxP"
+# --- A2 : meme tenant ET meme compte : session reutilisee ---
+Reset-MockState
+$global:MockOpts.EwsList = @('0000aaaa-0000-0000-0000-00000000dddd')
+$global:MockOpts.ExoPreSession = @{ TenantID = $global:MockTenantId; UserPrincipalName = $global:MockUser }
+$baseW2 = New-Base 'W2'; $allBases.Add($baseW2)
+$rW2 = Invoke-Connector (Get-BaseParams $baseW2 @('Mail')) $baseW2
+$appW2 = Get-ExoAppIdOf $AppSrc
+$setsW2 = Get-ExoSets $rW2
+T 34 'A : session du MEME tenant et du meme compte REUTILISEE : aucune nouvelle connexion, AppID ajoute, exit 0, aucun avertissement' ($rW2.Exit -eq 0 -and (Get-ExoCmdCount $rW2 'CONNECT-EXO') -eq 0 -and $setsW2.Count -eq 1 -and $setsW2[0].Body -eq "Add=$appW2" -and $rW2.Console -match 'reutilisee' -and $rW2.Console -notmatch 'AVERTISSEMENT - Session Exchange') "exit=$($rW2.Exit) connect=$(Get-ExoCmdCount $rW2 'CONNECT-EXO') sets=$($setsW2.Count)"
+# --- A3 : meme tenant mais AUTRE compte : traite comme une session etrangere ---
+Reset-MockState
+$global:MockOpts.ExoPreSession = @{ TenantID = $global:MockTenantId; UserPrincipalName = 'autre.admin@contoso.onmicrosoft.com' }
+$baseW3 = New-Base 'W3'; $allBases.Add($baseW3)
+$pW3 = Get-BaseParams $baseW3 @('Mail'); $pW3['AllowForeignSession'] = $true
+$rW3 = Invoke-Connector $pW3 $baseW3
+T 34 'A (avec -AllowForeignSession) : session d''un AUTRE compte (meme tenant) : traitee comme une session etrangere (etape manuelle, aucune connexion, exit 2)' ($rW3.Exit -eq 2 -and (Get-ExoCmdCount $rW3 'CONNECT-EXO') -eq 0 -and (($rW3.Console -replace '\s+', ' ') -match $msgA)) "exit=$($rW3.Exit)"
+
+# --- B : aucune commande manuelle ne contient Disconnect-ExchangeOnline ---
+Reset-MockState
+$global:MockOpts.ExoConnectFails = $true
+$baseW4 = New-Base 'W4'; $allBases.Add($baseW4)
+$rW4 = Invoke-Connector (Get-BaseParams $baseW4 @('Mail')) $baseW4
+$mdW4 = Read-RunFile $rW4 'Rapport-*.md'
+T 34 'B : aucun Disconnect-ExchangeOnline dans les commandes affichees (console et rapport : session etrangere, connexion en echec)' ($mdW4 -notmatch 'Disconnect-ExchangeOnline' -and $rW4.Console -notmatch 'Disconnect-ExchangeOnline' -and $mdW1 -notmatch 'Disconnect-ExchangeOnline' -and $rW1.Console -notmatch 'Disconnect-ExchangeOnline') 'Disconnect-ExchangeOnline affiche'
+T 34 'B : a la place, un conseil « fermez la console apres usage » dans les commandes manuelles' ($mdW4 -match '(?i)fermez la console PowerShell apres usage' -and $mdW1 -match '(?i)fermez la console PowerShell apres usage') 'conseil absent'
+
+# --- C : valeurs de securite par defaut : avertissement VISIBLE, premier de « A verifier » ---
+Reset-MockState; $global:MockOpts.SecurityDefaults = $true
+$baseW5 = New-Base 'W5'; $allBases.Add($baseW5)
+$rW5 = Invoke-Connector (Get-BaseParams $baseW5 @('Mail', 'OneDrive') 'Target') $baseW5
+$mdW5 = Read-RunFile $rW5 'Rapport-*.md'
+$chkW5 = @(Get-ReportNsTitles $mdW5 'A verifier')
+$consW5 = ($rW5.Console -replace '\s+', ' ')
+T 34 'C : valeurs de securite par defaut ACTIVES : avertissement visible dans la console au moment du plan (effet exact, options, jamais modifiees)' ($consW5 -match 'AVERTISSEMENT - Valeurs de securite par defaut ACTIVES' -and $consW5 -match 'jobs OneDrive et SharePoint de ce tenant ECHOUERONT' -and $consW5 -match 'courrier \(Mail\) n.est pas concerne' -and $consW5 -match 'acces conditionnel cible qui EXCLUT le compte de service' -and $consW5 -match 'renoncer a OneDrive / SharePoint' -and $consW5 -match 'ne modifie jamais') "console sans avertissement complet"
+T 34 'C : l''avertissement est affiche apres le tableau du plan (au moment du plan), pas avant l''inventaire' ($rW5.Console.IndexOf('AVERTISSEMENT - Valeurs de securite') -gt $rW5.Console.IndexOf('Inventaire et plan')) 'ordre'
+T 34 'C : rapport : ligne PREMIERE de « A verifier » avec l''effet exact et les options' ($chkW5.Count -ge 1 -and $chkW5[0] -match '(?i)valeurs de securite par defaut' -and $mdW5 -match 'jobs OneDrive et SharePoint de ce tenant ECHOUERONT' -and $mdW5 -match 'acces conditionnel cible') "titres=$($chkW5 -join ' | ')"
+T 34 'C : l''outil ne modifie JAMAIS les valeurs de securite par defaut ni une strategie (aucune ecriture /policies)' (@($rW5.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.IsWrite -and $_.Path -like '/policies*' }).Count -eq 0) 'ecriture /policies'
+Reset-MockState; $global:MockOpts.SecurityDefaults = $true
+$baseW6 = New-Base 'W6'; $allBases.Add($baseW6)
+$rW6 = Invoke-Connector (Get-BaseParams $baseW6 @('OneDrive')) $baseW6   # v2.7 : Mail exige le compte ; OneDrive en Source n'en exige pas
+$mdW6 = Read-RunFile $rW6 'Rapport-*.md'
+T 34 'C : sans compte de service (OneDrive seul en Source), AUCUN avertissement de securite par defaut (console ni rapport)' ($rW6.Console -notmatch 'Valeurs de securite par defaut ACTIVES' -and $mdW6 -notmatch '(?i)valeurs de securite par defaut') 'avertissement affiche sans compte de service'
+$global:MockOpts.SecurityDefaults = $false
+
+# --- D : reinitialisation du mot de passe du compte de service refusee (403) a la RELANCE ---
+$dq = New-TargetOneDrive 'D1'
+$cD0 = Get-MockConnector $ConnTgt; $fnD0 = "$($cD0.connectorCertificate.fileName)"; $stD0 = "$($cD0.rawSettings)"; $certD0 = Get-ConnCert $cD0
+$pwD0 = (Get-MockUser $SvcTgt).PwdMarker
+$thD0 = @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0]))
+T 34 'D : premier passage (creation du compte avec son mot de passe) INCHANGE : exit 0, connecteur coherent' ($dq.Run.Exit -eq 0 -and $cD0 -and (Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) -eq '') "exit=$($dq.Run.Exit) $(Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt)"
+$global:MockOpts.ForbidPasswordReset = $true
+$pD = $dq.Params.Clone()
+$rD = Invoke-Connector $pD $dq.Base
+$cD1 = Get-MockConnector $ConnTgt
+$thD1 = @(Get-MockThumbs (@(Get-MockApp $AppTgt)[0]))
+$repD = Read-RunFile $rD 'Rapport-*.md'
+$consD = ($rD.Console -replace '\s+', ' ')
+$pwdRowsD = @(Get-PlanRows $rD | Where-Object { $_.Zone -eq 'Mot de passe' })
+T 34 'D : reset refuse (403) : AUCUN mot de passe envoye au connecteur et AUCUN PUT / POST Cloudiway ; le connecteur est strictement inchange' ($rD.Exit -eq 2 -and $rD.CiwWrites -eq 0 -and "$($cD1.rawSettings)" -eq $stD0 -and "$($cD1.connectorCertificate.fileName)" -eq $fnD0 -and (Get-ConnCert $cD1).Thumbprint -eq $certD0.Thumbprint) "exit=$($rD.Exit) ciwWrites=$($rD.CiwWrites) fileName=$($cD1.connectorCertificate.fileName)"
+T 34 'D : reset refuse : le mot de passe du compte est intact (le PATCH passwordProfile a ete refuse) et la ligne « Mot de passe » est en echec' ((Get-MockUser $SvcTgt).PwdMarker -eq $pwD0 -and @($rD.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.Method -eq 'PATCH' -and $_.Path -like '/users/*' -and $_.Status -eq '403' }).Count -ge 1 -and $pwdRowsD.Count -eq 1) "pwd=$($pwdRowsD.Count)"
+T 34 'D : ancien certificat CONSERVE (aucun removeKey / removePassword), nouveau certificat deja ajoute a l''application conserve pour la relance' (@($rD.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.Path -match '(removeKey|removePassword)$' }).Count -eq 0 -and $thD1.Count -eq ($thD0.Count + 1) -and @($thD0 | Where-Object { $thD1 -notcontains $_ }).Count -eq 0) "avant=$($thD0.Count) apres=$($thD1.Count)"
+T 34 'D : message clair : mot de passe non change, le connecteur garde l''ancien, -KeepCredentials n''y change rien, reinitialiser a la main puis ressaisir dans le portail (console et rapport)' ($consD -match 'mot de passe du compte de service n.a pas pu etre change dans Entra' -and $consD -match 'garde l.ancien mot de passe' -and $consD -match '-KeepCredentials n.y change rien' -and $consD -match 'ressaisissez-le dans le portail Cloudiway' -and $repD -match 'n.a pas pu .tre chang' -and $repD -match 'renouvellement du connecteur ANNULE') 'message absent'
+T 34 'D : « A faire » du rapport : mot de passe NON change (renouvellement annule), plus la mention de desynchronisation' ($repD -match 'NON change \(renouvellement du connecteur annule\)') 'titre A faire absent'
+$global:MockOpts.ForbidPasswordReset = $false
+# relance sans refus : tout se resynchronise (nouveau certificat + nouveau mot de passe, ancien certificat retire)
+$rD2 = Invoke-Connector ($dq.Params.Clone()) $dq.Base
+T 34 'D : relance suivante sans refus : mot de passe reinitialise AVANT le connecteur (PATCH /users avant PUT), connecteur coherent, exit 0' ($rD2.Exit -eq 0 -and (Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt) -eq '' -and (Get-MockUser $SvcTgt).PwdMarker -ne $pwD0 -and (@($rD2.Calls | Where-Object { $_.Kind -eq 'Graph' -and $_.Method -eq 'PATCH' -and $_.Path -like '/users/*' -and $_.Body -match 'passwordProfile' } | ForEach-Object Seq)[0]) -lt (@($rD2.Calls | Where-Object { $_.Kind -eq 'Ciw' -and $_.Method -eq 'PUT' } | ForEach-Object Seq)[0])) "exit=$($rD2.Exit) $(Test-ConnCoherence $ConnTgt $AppTgt $SvcTgt)"
+# Reset accepte mais PUT en echec : desynchronisation POSSIBLE dite clairement
+$global:MockOpts.CiwFail = @(@{ Method = 'PUT'; Pattern = '^/Connectors/\d+$'; Code = 503; Times = 1 })
+$rD3 = Invoke-Connector ($dq.Params.Clone()) $dq.Base
+$repD3 = Read-RunFile $rD3 'Rapport-*.md'
+T 34 'D : reset accepte puis PUT en echec : exit 2, « DESYNCHRONISATION POSSIBLE » avec la marche a suivre (relancer sans -KeepCredentials)' ($rD3.Exit -eq 2 -and $repD3 -match 'DESYNCHRONISATION POSSIBLE' -and $repD3 -match 'sans -KeepCredentials') "exit=$($rD3.Exit)"
+$global:MockOpts.CiwFail = @()
+
+# --- D (mutation de controle) : le meme scenario contre une COPIE du package dont la garde est retiree DOIT etre detecte (un PUT part) ---
+$mutDir = Join-Path $tmpRoot 'mutD'; New-Item -ItemType Directory -Path (Join-Path $mutDir 'lib') -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $pkg 'cloudiway-connector.ps1') -Destination $mutDir
+foreach ($lf in (Get-ChildItem -LiteralPath (Join-Path $pkg 'lib') -Filter '*.ps1' -File)) { Copy-Item -LiteralPath $lf.FullName -Destination (Join-Path $mutDir 'lib') }
+$mutFile = Join-Path $mutDir 'lib\cloudiway.ps1'
+$mutTxt = [System.IO.File]::ReadAllText($mutFile)
+$mutNeedle = "[bool](Get-CiwProp `$c 'ServiceAccountResetFailed') -or -not `$haveSaPwd"
+$mutOk = ($mutTxt.Contains($mutNeedle))
+[System.IO.File]::WriteAllText($mutFile, $mutTxt.Replace($mutNeedle, '$false'), [System.Text.UTF8Encoding]::new($true))
+T 34 'D mutation : la garde est bien presente dans lib\cloudiway.ps1 (la mutation de controle s''applique)' $mutOk 'garde introuvable : mutation sans effet'
+$mainSave = $main; $main = Join-Path $mutDir 'cloudiway-connector.ps1'
+$global:MockOpts.ForbidPasswordReset = $true
+$rDm = Invoke-Connector ($dq.Params.Clone()) $dq.Base
+$main = $mainSave; $global:MockOpts.ForbidPasswordReset = $false
+T 34 'D mutation de controle : SANS la garde, le scenario « reset refuse » est DETECTE (un PUT Cloudiway part malgre le refus), donc le test D ci-dessus protege bien' ($rDm.CiwWrites -gt 0) "ciwWrites=$($rDm.CiwWrites)"
+Remove-Item -LiteralPath $mutDir -Recurse -Force -ErrorAction SilentlyContinue
+
+# --- E : SharePoint / Teams : identifiant de produit INCONNU, comportement honnete ---
+Reset-MockState
+$baseW7 = New-Base 'W7'; $allBases.Add($baseW7)
+$rW7 = Invoke-Connector (Get-BaseParams $baseW7 @('Mail', 'OneDrive', 'SharePoint')) $baseW7
+$cwW7 = @(Get-PlanRows $rW7 | Where-Object { $_.Zone -eq 'Cloudiway' })
+$consW7 = ($rW7.Console -replace '\s+', ' ')
+T 34 'E (v2.6, echec rapide) : SharePoint sans identifiant : exit 1 a l''etape 1, message « l''identifiant du produit Cloudiway pour SharePoint n''est pas connu : relancez avec -ProductIds ... »' ($rW7.Exit -eq 1 -and $consW7 -match 'identifiant du produit Cloudiway pour SharePoint n.est pas connu' -and $consW7 -match '-ProductIds') "exit=$($rW7.Exit)"
+T 34 'E (v2.6) : aucun appel reseau, aucun objet cree, aucun connecteur (aucune ecriture avant la validation)' (-not (Get-MockConnector $ConnSrc) -and $rW7.CiwWrites -eq 0 -and $rW7.GraphCalls -eq 0 -and -not (Get-MockApp $AppSrc)) "graph=$($rW7.GraphCalls)"
+Reset-MockState
+$baseW8 = New-Base 'W8'; $allBases.Add($baseW8)
+$pW8 = Get-BaseParams $baseW8 @('Mail', 'OneDrive', 'SharePoint'); $pW8['ProductIds'] = '5,6,9'
+$rW8 = Invoke-Connector $pW8 $baseW8
+$cW8 = Get-MockConnector $ConnSrc
+T 34 'E : avec -ProductIds 5,6,9 : le produit SharePoint est declare sur le connecteur (rawProductList [5,6,9]), exit 0' ($rW8.Exit -eq 0 -and $cW8 -and $cW8.rawProductList -eq '[5,6,9]') "exit=$($rW8.Exit) produits=$($cW8.rawProductList)"
+# -ProductMapFile de bout en bout
+Reset-MockState
+$mapOk = Join-Path $tmpRoot 'ProductMap-test.json'
+[System.IO.File]::WriteAllText($mapOk, '{ "SharePoint": 9 }', [System.Text.UTF8Encoding]::new($false))
+$baseW9 = New-Base 'W9'; $allBases.Add($baseW9)
+$pW9 = Get-BaseParams $baseW9 @('Mail', 'OneDrive', 'SharePoint'); $pW9['ProductMapFile'] = $mapOk
+$rW9 = Invoke-Connector $pW9 $baseW9
+$cW9 = Get-MockConnector $ConnSrc
+T 34 'E : -ProductMapFile { "SharePoint": 9 } de bout en bout : seule la charge citee est surchargee (Mail = 5 et OneDrive = 6 gardent leur valeur), connecteur [5,6,9], exit 0' ($rW9.Exit -eq 0 -and $cW9 -and $cW9.rawProductList -eq '[5,6,9]') "exit=$($rW9.Exit) produits=$($cW9.rawProductList)"
+$mapBad = Join-Path $tmpRoot 'ProductMap-bad.json'
+[System.IO.File]::WriteAllText($mapBad, '{ "SharePoint": "abc" }', [System.Text.UTF8Encoding]::new($false))
+Reset-MockState
+$baseW10 = New-Base 'W10'; $allBases.Add($baseW10)
+$pW10 = Get-BaseParams $baseW10 @('Mail', 'SharePoint'); $pW10['ProductMapFile'] = $mapBad
+$rW10 = Invoke-Connector $pW10 $baseW10
+T 34 'E : fichier de table invalide : arret avant toute connexion (exit 1, message), aucune ecriture' ($rW10.Exit -eq 1 -and $rW10.GraphCalls -eq 0 -and $rW10.CiwWrites -eq 0 -and (($rW10.Console -replace '\s+', ' ') -match 'Table de produits illisible')) "exit=$($rW10.Exit) graph=$($rW10.GraphCalls)"
+$pW11 = Get-BaseParams $baseW10 @('Mail', 'SharePoint'); $pW11['ProductMapFile'] = (Join-Path $tmpRoot 'inexistant.json')
+Reset-MockState
+$rW11 = Invoke-Connector $pW11 $baseW10
+T 34 'E : fichier de table introuvable : arret avant toute connexion (exit 1)' ($rW11.Exit -eq 1 -and $rW11.GraphCalls -eq 0 -and (($rW11.Console -replace '\s+', ' ') -match 'Table de produits illisible')) "exit=$($rW11.Exit)"
+$permTxt = [System.IO.File]::ReadAllText((Join-Path $pkg 'lib\permissions.ps1'))
+$exMapTxt = [System.IO.File]::ReadAllText((Join-Path $pkg 'productmap.example.json'))
+$exMapOk = $false; try { $exMapJ = $exMapTxt | ConvertFrom-Json; $exMapOk = ($null -ne $exMapJ.SharePoint) } catch { }
+T 34 'E : permissions.ps1 : SharePoint et Teams valent $null via UNE constante chacun (ProductIdSharePoint / ProductIdTeams), plus de « SharePoint = 6 » ; productmap.example.json valide' ($permTxt -match '\$script:ProductIdSharePoint\s*=\s*\$null' -and $permTxt -match 'SharePoint\s*=\s*\$script:ProductIdSharePoint' -and $permTxt -match '\$script:ProductIdTeams\s*=\s*\$null' -and $permTxt -notmatch 'SharePoint\s*=\s*6' -and $exMapOk) 'table ou exemple incorrect'
+
+# ===================================================================================================
 # POINT 11 (suite) : balayage des secrets (v2 : AUCUNE valeur sensible dans un fichier ni dans la console)
 # ===================================================================================================
 $secretValues = @($allSecretValues | Where-Object { $_ } | Sort-Object -Unique)
@@ -2006,15 +2335,15 @@ T 24 'aucun emoji dans les .ps1 / .md du package' ($emoji.Count -eq 0) ($emoji -
 # ===================================================================================================
 Say ''
 Say '================================================================================'
-Say ' BANC DE TEST HORS LIGNE - CloudiwayConnector v2.4'
+Say ' BANC DE TEST HORS LIGNE - CloudiwayConnector v2.7'
 Say '================================================================================'
 $labels = [ordered]@{
-    '1' = 'Premier passage Source (Mail + OneDrive)'; '2' = 'Second passage identique : zero ecriture'; '3' = '-WhatIf'
-    '5' = 'Non Global Administrator'; '6' = 'Tenant / compte different'; '7' = 'Portail Cloudiway inaccessible'
-    '10' = '-RotateCredentials'; '11' = 'Secrets'
+    '1' = 'Premier passage Source (Mail + OneDrive + SharePoint)'; '2' = 'Second passage identique : zero ecriture'; '3' = '-WhatIf'
+    '4' = 'Cible : Application + Deleguee'; '5' = 'Non Global Administrator'; '6' = 'Tenant / compte different'; '7' = 'Portail Cloudiway inaccessible'
+    '8' = 'Charge a produit inconnu / -ProductIds'; '9' = 'Homonyme sans etiquette / -AdoptExisting'; '10' = '-RotateCredentials'; '11' = 'Secrets'
     '12' = 'Aucun DELETE'; '13' = 'Mode questions'; '14' = '-Discover'; '15' = '-Workloads en une chaine'
     '16' = 'Noms codifies / projet detecte / redirections'; '17' = 'Identifiants en memoire (aucun fichier)'; '18' = 'Renouvellement automatique'
-    '19' = 'AuthMethod Secret / Both'; '21' = '-SkipCloudiway / echec Cloudiway puis relance'
+    '19' = 'AuthMethod Secret / Both'; '20' = 'Compte de service (reinitialisation)'; '21' = '-SkipCloudiway / echec Cloudiway puis relance'
     '22' = 'Connexion Cloudiway (jeton, cookie, PAT, projets)'; '23' = 'Resolution du tenant / adresses'; '24' = 'Qualite des sources'; 'B' = 'Bonus (robustesse)'
     '25' = 'V2.1 flux Cloudiway (PUT, adoption, jeton, ordre, collisions, 2FA)'; '26' = 'V2.1 Graph (propagation, keyCredentials, plateforme, policies, MFA)'
     '27' = 'V2.1 mineurs (secrets, validite, noms, horloge, encodage)'; '28' = 'V2.1 documentation, lanceur, conseils'
@@ -2022,6 +2351,7 @@ $labels = [ordered]@{
     '31' = 'V2.2 prochaines actions (A faire / A verifier), Exchange EWS, version, affichage'
     '32' = 'V2.3 removeKey (preuve de possession), renouvellement par defaut, -KeepCredentials'
     '33' = 'V2.4 fileName = marqueur, relecture apres ecriture, session Graph, svc-ciw-, removeKey avec reessais, banc fidele'
+    '34' = 'V2.5 retours du premier client reel : session Exchange, commandes manuelles, securite par defaut, mot de passe 403, SharePoint'; '36' = 'V2.7 compte administrateur obligatoire pour Mail (Source et Cible), -WithoutServiceAccount'; '35' = 'V2.6 Both par defaut, jetons / automatisation, echec rapide produit inconnu'
 }
 $fails = 0
 foreach ($k in $labels.Keys) {

@@ -92,19 +92,28 @@ $script:EntraRoleTemplates = @{
 # V2 : roles Exchange Administrator et Exchange Recipient Administrator sur l'APPLICATION, pour le Mail seulement.
 $script:WorkloadsNeedingExchangeRoles = @('Mail')
 # V2 : compte de service (utilisateur, role SharePoint Administrator) requis, par mode :
-#   OneDrive en CIBLE seulement (flux ROPC) ; Teams et SharePoint en source et en cible.
+#   Mail en source et en cible (v2.7, compte administrateur exige par Cloudiway) ; OneDrive en CIBLE seulement (flux ROPC) ;
+#   Teams et SharePoint en source et en cible.
+# v2.7 : le courrier (Mail) exige AUSSI le compte administrateur (MigrationAccount + MigrationAccountPassword), en Source comme en Cible
+# (constat reel 2026-11-04 : sans lui l'audit Cloudiway ne demarre pas ; avec lui l'audit va au bout).
 $script:WorkloadsNeedingServiceAccount = @{
-    Source = @('SharePoint', 'Teams')
-    Target = @('OneDrive', 'SharePoint', 'Teams')
+    Source = @('Mail', 'SharePoint', 'Teams')
+    Target = @('Mail', 'OneDrive', 'SharePoint', 'Teams')
 }
 
 # --- Produits Cloudiway (rawProductList). $null = inconnu ---
+# v2.5 (E) : SharePoint et Teams = INCONNUS ($null) tant que l'identifiant n'a pas ete MESURE sur un vrai portail (premier client reel, 2026-11-03 :
+# les connecteurs n'ont que [5,6], donc 6 ne distingue pas SharePoint). Le mapper sur 6 donnait l'illusion d'un support : la ligne Cloudiway
+# est desormais BLOQUEE tant que l'identifiant n'est pas fourni (-ProductIds ou -ProductMapFile, ou fichier facultatif productmap.json du package).
+# UNE seule constante a changer quand l'identifiant est connu (ex. $script:ProductIdSharePoint = 12) :
+$script:ProductIdSharePoint = $null
+$script:ProductIdTeams = $null
 $script:ProductTable = [ordered]@{
     Mail       = 5
     Archive    = $null
     OneDrive   = 6      # "Fichiers"
-    SharePoint = 6      # "Fichiers" ; a distinguer si le portail le fait (inconnu)
-    Teams      = $null
+    SharePoint = $script:ProductIdSharePoint   # inconnu : voir ci-dessus
+    Teams      = $script:ProductIdTeams
     GalSync    = $null
     Intune     = $null
     FreeBusy   = $null   # fonctions du Mail a priori, mais produit non confirme : non devine
@@ -166,7 +175,8 @@ function Get-PermissionSet {
 function Get-RequiredEntraRoles {
     param(
         [Parameter(Mandatory)][ValidateSet('Source', 'Target')][string]$Mode,
-        [string[]]$Workloads = @()
+        [string[]]$Workloads = @(),
+        [switch]$WithoutServiceAccount # v2.7 : -WithoutServiceAccount : l'exigence du Mail (seule) est ecartee ; les autres charges (SharePoint, Teams, OneDrive en Cible) l'imposent toujours
     )
     $w = ConvertTo-CanonicalWorkloads $Workloads
     $list = [System.Collections.Generic.List[object]]::new()
@@ -174,20 +184,20 @@ function Get-RequiredEntraRoles {
         $list.Add([pscustomobject]@{ Name = 'Exchange Administrator'; TemplateId = $script:EntraRoleTemplates.ExchangeAdministrator; Target = 'ServicePrincipal' })
         $list.Add([pscustomobject]@{ Name = 'Exchange Recipient Administrator'; TemplateId = $script:EntraRoleTemplates.ExchangeRecipientAdministrator; Target = 'ServicePrincipal' })
     }
-    if (Test-NeedServiceAccount -Mode $Mode -Workloads $w) {
+    if ((Test-NeedServiceAccount -Mode $Mode -Workloads $w -IgnoreMail:$WithoutServiceAccount)) {
         $list.Add([pscustomobject]@{ Name = 'SharePoint Administrator'; TemplateId = $script:EntraRoleTemplates.SharePointAdministrator; Target = 'ServiceAccount' })
     }
     return $list.ToArray()
 }
 
-# Vrai si une charge impose un compte de service pour ce mode (V2 : OneDrive en Cible, SharePoint et Teams dans les deux sens).
+# Vrai si une charge impose un compte de service pour ce mode (V2.7 : Mail dans les deux sens, OneDrive en Cible, SharePoint et Teams dans les deux sens).
 # Mode absent : repris du contexte ; toujours inconnu, on retient le cas le plus large (Cible).
 function Test-NeedServiceAccount {
-    param([string]$Mode = '', [string[]]$Workloads = @())
+    param([string]$Mode = '', [string[]]$Workloads = @(), [switch]$IgnoreMail)   # -IgnoreMail : -WithoutServiceAccount (v2.7)
     if (-not $Mode) { try { $Mode = "$($script:Ctx.Mode)" } catch { $Mode = '' } }
     $key = if ($Mode -ieq 'Source') { 'Source' } else { 'Target' }
     $need = $script:WorkloadsNeedingServiceAccount[$key]
-    return (@(ConvertTo-CanonicalWorkloads $Workloads | Where-Object { $_ -in $need }).Count -gt 0)
+    return (@(ConvertTo-CanonicalWorkloads $Workloads | Where-Object { $_ -in $need -and -not ($IgnoreMail -and $_ -eq 'Mail') }).Count -gt 0)
 }
 
 # Noms codifies. Surchargeables par parametres.

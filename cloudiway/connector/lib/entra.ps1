@@ -71,10 +71,15 @@ function Get-EntraNames {
     return [pscustomobject]@{ App = "$(Get-EntraCtx 'AppName')"; ServiceAccountLocal = "$(Get-EntraCtx 'ServiceAccountName')"; ServiceAccountDisplay = "$(Get-EntraCtx 'ServiceAccountName')"; Connector = "$(Get-EntraCtx 'ConnectorName')"; CertificateSubject = '' }
 }
 
+# v2.6 : portees Graph requises ABSENTES du jeton fourni (-GraphAccessToken), calculees par le script principal depuis la revendication scp. Jamais devinees.
+function Test-TokenScopeMissing([string]$Scope) {
+    try { return (@(Get-EntraCtx 'GraphTokenMissingScopes') | Where-Object { $_ -ieq $Scope }).Count -gt 0 } catch { return $false }
+}
+
 function Get-EntraAuthMethod {
     $a = "$(Get-EntraCtx 'AuthMethod')"
     if ($a -in 'Certificate', 'Secret', 'Both') { return $a }
-    return 'Certificate'
+    return 'Both'
 }
 
 function Get-EntraValidityDays {
@@ -518,6 +523,7 @@ function Get-EntraState {
 
         # Acces conditionnel (AVERTISSEMENT seulement)
         try {
+            if (Test-TokenScopeMissing 'Policy.Read.All') { throw 'portee Policy.Read.All absente du jeton fourni (-GraphAccessToken) : politiques d''acces conditionnel non lues, verifier a la main que le compte de service est exclu de la MFA' }
             $pol = @(Invoke-GraphGet '/identity/conditionalAccess/policies' -All)
             $saId = if ($state.ServiceAccount) { "$($state.ServiceAccount.id)" } else { '' }
             $hits = [System.Collections.Generic.List[object]]::new()
@@ -539,6 +545,7 @@ function Get-EntraState {
         catch { $state.CaError = Get-ErrMsg $_; Write-RunLog ("Acces conditionnel illisible : {0}" -f $state.CaError) }
         # Valeurs de securite par defaut (AVERTISSEMENT seulement) : si actives, la MFA est imposee a tous, compte de service compris.
         try {
+            if (Test-TokenScopeMissing 'Policy.Read.All') { throw 'portee Policy.Read.All absente du jeton fourni (-GraphAccessToken) : etat des valeurs de securite par defaut NON lu (ni suppose)' }
             $sd = Invoke-GraphGet '/policies/identitySecurityDefaultsEnforcementPolicy'
             if ($null -ne $sd -and $null -ne $sd.isEnabled) { $state.SecurityDefaults = [bool]$sd.isEnabled }
         }
@@ -654,6 +661,11 @@ function Test-ConnectorNeedsAccountPassword {
     return ($acc -ine (Get-ServiceAccountUpn))
 }
 
+# v2.5 (C) : texte unique de l'avertissement « valeurs de securite par defaut actives » (console, ligne du plan, rapport). L'outil ne les modifie JAMAIS.
+function Get-SecurityDefaultsEffectText {
+    return 'les valeurs de securite par defaut sont ACTIVES dans ce tenant : la MFA est imposee a tous les comptes, y compris le compte de service cree par l''outil. EFFET : les jobs OneDrive et SharePoint de ce tenant ECHOUERONT a l''authentification du compte de service (flux sans interaction) ; le courrier (Mail) n''est pas concerne. OPTIONS : (1) desactiver les valeurs de securite par defaut au profit d''un acces conditionnel cible qui EXCLUT le compte de service, ou (2) renoncer a OneDrive / SharePoint pour ce tenant. L''outil ne modifie jamais ces parametres.'
+}
+
 # Liste des URI de redirection a declarer : Teams en Source uniquement.
 function Get-WantedRedirectUris {
     $mode = "$(Get-EntraCtx 'Mode')"
@@ -704,6 +716,9 @@ function New-EntraPlan {
     Set-EntraCtx 'CredentialsRotationReason' $dec.Reason
     Set-EntraCtx 'ServiceAccountPasswordManual' $false
     Set-EntraCtx 'ServiceAccountResetPending' $false
+    Set-EntraCtx 'ServiceAccountResetDone' $false
+    Set-EntraCtx 'ServiceAccountResetFailed' $false
+    Set-EntraCtx 'SecurityDefaultsActive' $false
     $wantUris = @(Get-WantedRedirectUris)
 
     # ---- Application ----
@@ -817,7 +832,7 @@ function New-EntraPlan {
         else { [void](Add-EntraItem 'Roles' $nm 'CREATE' 'a attribuer au principal de service de l''application' @{ Kind = 'EntraRole'; RoleName = $r.Name; TemplateId = $r.TemplateId; Target = 'ServicePrincipal' }) }
     }
 
-    # ---- Exchange Online (EWS), charges Mail / Archive : zone du plan placee apres les roles (v2.2) ----
+    # ---- Exchange Online (EWS), Charge Mail : zone du plan placee apres les roles (v2.2) ----
     if (Get-Command -Name New-ExchangePlan -ErrorAction SilentlyContinue) {
         if ($appBlocked) { if ($script:Exo -and $script:Exo.Needed) { [void](Add-EntraItem 'Exchange' 'EWS : AppID dans EwsAllowedAppIDs' 'SKIP' $skipDep) } }
         else { New-ExchangePlan }
@@ -886,14 +901,15 @@ function New-EntraPlan {
             if ($fix.Count -gt 0) {
                 [void](Add-EntraItem 'ServiceAccount' $nm 'UPDATE' (($fix -join ' ; ') + ' ; mot de passe NON modifie ici') @{ Kind = 'SaPatch'; UserId = "$($u.id)"; Mark = $false; Policies = "$($u.passwordPolicies)" })
             }
-            else { [void](Add-EntraItem 'ServiceAccount' $nm 'OK' $(if ($resetPw) { 'compte existant, etiquete et conforme (son mot de passe est traite apres l''ecriture du connecteur : voir la ligne suivante)' } else { 'compte existant, etiquete et conforme ; mot de passe inchange (le connecteur n''a pas besoin d''en recevoir un)' })) }
-            # M2/M3 : le mot de passe n'est reinitialise QUE si le connecteur doit en recevoir un, et APRES l'ecriture reussie du connecteur.
+            else { [void](Add-EntraItem 'ServiceAccount' $nm 'OK' $(if ($resetPw) { 'compte existant, etiquete et conforme (son mot de passe est traite avant l''ecriture du connecteur : voir la ligne suivante)' } else { 'compte existant, etiquete et conforme ; mot de passe inchange (le connecteur n''a pas besoin d''en recevoir un)' })) }
+            # M2/M3 (v2.5, retour du premier client reel) : le mot de passe n'est reinitialise QUE si le connecteur doit en recevoir un, et dans Entra
+            # D'ABORD ; le connecteur ne le recoit que si Entra l'a accepte (un compte qui detient un role d'administrateur peut refuser : HTTP 403).
             if ($resetPw) {
                 Set-EntraCtx 'ServiceAccountResetPending' $true
-                [void](Add-EntraItem 'ServiceAccountPwd' $nm 'UPDATE' ('nouveau mot de passe, reinitialise APRES l''ecriture du connecteur dans Cloudiway (le connecteur le recoit d''abord ; si l''ecriture echoue, le compte garde son mot de passe actuel) : ' + $dec.Reason) @{ Kind = 'SaPwdReset'; UserId = "$($u.id)" })
+                [void](Add-EntraItem 'ServiceAccountPwd' $nm 'UPDATE' ('nouveau mot de passe, reinitialise dans Entra AVANT l''ecriture du connecteur (le connecteur ne le recoit que si Entra l''a accepte ; si Entra refuse, le connecteur n''est pas modifie et garde son mot de passe) : ' + $dec.Reason) @{ Kind = 'SaPwdReset'; UserId = "$($u.id)" })
             }
         }
-        foreach ($r in @(Get-RequiredEntraRoles -Mode $mode -Workloads $workloads | Where-Object Target -EQ 'ServiceAccount')) {
+        foreach ($r in @(Get-RequiredEntraRoles -Mode $mode -Workloads $workloads -WithoutServiceAccount:([bool](Get-EntraCtx 'WithoutServiceAccount')) | Where-Object Target -EQ 'ServiceAccount')) {
             $rn = "Role $($r.Name) du compte de service"
             if ($saBlocked) { [void](Add-EntraItem 'ServiceAccount' $rn 'SKIP' 'compte de service bloque : etape ignoree') }
             elseif ($u -and @($State.ServiceAccountRoles | Where-Object { $_ -ieq $r.TemplateId }).Count -gt 0) { [void](Add-EntraItem 'ServiceAccount' $rn 'OK' 'deja attribue') }
@@ -907,7 +923,8 @@ function New-EntraPlan {
             [void](Add-EntraItem 'ServiceAccount' 'Acces conditionnel (MFA)' 'OK' "AVERTISSEMENT : politique(s) exigeant la MFA susceptible(s) de viser le compte de service : $list. $mfaHint")
         }
         if ($State.SecurityDefaults -eq $true) {
-            [void](Add-EntraItem 'ServiceAccount' 'Valeurs de securite par defaut (MFA)' 'OK' 'AVERTISSEMENT : les valeurs de securite par defaut sont ACTIVES dans ce tenant : la MFA est imposee a tous les comptes, y compris le compte de service, qui se connecte sans interaction (la migration Teams / OneDrive Cible echouera). Il faut les desactiver (et les remplacer par des strategies d''acces conditionnel ciblees) ou fournir un autre moyen avec le client ; l''outil ne les modifie jamais.')
+            Set-EntraCtx 'SecurityDefaultsActive' $true
+            [void](Add-EntraItem 'ServiceAccount' 'Valeurs de securite par defaut (MFA)' 'OK' ('AVERTISSEMENT : ' + (Get-SecurityDefaultsEffectText)))
         }
     }
 }
@@ -1158,7 +1175,10 @@ function Invoke-EntraApply([string]$Key) {
                 }
                 catch {
                     $m = Get-ErrMsg $_
-                    if ($m -notmatch 'already exists|ExistingRoleAssignment|conflict') { throw }
+                    if ($m -notmatch 'already exists|ExistingRoleAssignment|conflict') {
+                        if (Test-TokenScopeMissing 'RoleManagement.ReadWrite.Directory') { throw ("portee RoleManagement.ReadWrite.Directory absente du jeton fourni (-GraphAccessToken) : le role '{0}' n'a pas pu etre attribue ({1}). L'attribuer a la main (Entra > Roles et administrateurs) ou fournir un jeton portant cette portee." -f $d.RoleName, $m) }
+                        throw
+                    }
                 }
                 Write-RunLog ("Role {0} attribue ({1})" -f $d.RoleName, $d.Target)
                 return $true
@@ -1335,8 +1355,16 @@ function Invoke-EntraApply([string]$Key) {
                 if (-not $newKid) { $script:EntraLastError = 'nettoyage refuse : aucun nouveau secret client n''a ete genere dans ce passage. Aucun secret retire.'; return $false }
                 if (-not [bool](Get-EntraCtx 'ConnectorWriteOk')) { $script:EntraLastError = 'nettoyage refuse : l''ecriture du connecteur Cloudiway n''est pas confirmee dans ce passage (le connecteur doit porter le nouveau secret avant tout retrait). Aucun secret retire.'; return $false }   # GARDE-CONNECTEUR
                 $prefix = Get-ToolKeyPrefix
-                $cur = Invoke-EntraRetry { Invoke-GraphGet ('/applications/{0}?$select=id,passwordCredentials' -f $oid) }
-                $before = @($cur.passwordCredentials)
+                # Propagation Entra (constate en reel le 2026-11-03 a la relance) : le secret ajoute quelques secondes plus tot peut ne pas etre encore
+                # lisible ; relire avec attente, comme pour les certificats, avant de conclure qu'il est absent.
+                $before = @()
+                foreach ($w in 0, 2, 4, 8, 12, 18) {
+                    if ($w -gt 0) { Start-Sleep -Seconds $w }
+                    $cur = Invoke-EntraRetry { Invoke-GraphGet ('/applications/{0}?$select=id,passwordCredentials' -f $oid) }
+                    $before = @($cur.passwordCredentials)
+                    if (@($before | Where-Object { (ConvertTo-KeyToken $_.keyId) -eq $newKid }).Count -gt 0) { break }
+                    Write-RunLog 'Nettoyage des secrets : nouveau secret pas encore visible (propagation), nouvelle lecture...'
+                }
                 if (@($before | Where-Object { (ConvertTo-KeyToken $_.keyId) -eq $newKid }).Count -eq 0) {
                     $script:EntraLastError = 'nettoyage refuse : le nouveau secret client n''est pas visible dans l''application. Aucun secret retire.'
                     return $false
@@ -1369,7 +1397,12 @@ function Invoke-EntraApply([string]$Key) {
                 $lst = [System.Collections.Generic.List[string]]::new(); if ($rem['CleanupRemoved']) { foreach ($x in @($rem['CleanupRemoved'])) { $lst.Add("$x") } }
                 foreach ($x in $info) { $lst.Add($x) }
                 $rem['CleanupRemoved'] = @($lst.ToArray())
-                if ($errs.Count -gt 0) { throw ('{0} secret(s) non retire(s) : {1}' -f $errs.Count, ($errs -join ' ; ')) }
+                if ($errs.Count -gt 0) {
+                    # removePassword refuse (403) : contrairement aux certificats (repli par PATCH), les secrets n'ont AUCUN repli (passwordCredentials n'est pas modifiable par PATCH).
+                    $hint403 = ''
+                    if (@($errs | Where-Object { $_ -match '403|Authorization_RequestDenied|Insufficient privileges' }).Count -eq $errs.Count) { $hint403 = ' removePassword est refuse (403) et aucun repli par PATCH n''existe pour les secrets : retirer ces secrets a la main dans Entra (Inscriptions d''applications > Certificats et secrets). Le nouveau secret est en place et transmis.' }
+                    throw ('{0} secret(s) non retire(s) : {1}{2}' -f $errs.Count, ($errs -join ' ; '), $hint403)
+                }
                 if (-not $gone) { throw 'les anciens secrets de l''outil apparaissent encore dans l''application apres removePassword (propagation ?)' }
                 Set-EntraCtx 'CleanupSecretsDone' $true
                 $script:EntraApplyNote = ('{0} ancien(s) secret(s) client retire(s) : {1}' -f $old.Count, ($info -join ' ; '))
@@ -1408,18 +1441,24 @@ function Invoke-EntraApply([string]$Key) {
             }
 
             'SaPwdReset' {
-                # M2 : reinitialisation APRES l'ecriture reussie du connecteur (le connecteur a recu ce mot de passe). Echec = desynchronisation, dite clairement.
-                $pass = "$($cred['ServiceAccountPassword'])"
-                if (-not $pass) { throw 'mot de passe genere indisponible (le connecteur n''a pas ete ecrit dans ce passage)' }
+                # v2.5 (D) : reinitialisation dans Entra D'ABORD. Le mot de passe n'est depose dans les identifiants en memoire (donc envoye au connecteur)
+                # QUE si Entra l'a accepte. Refus (typiquement HTTP 403 : compte qui detient un role d'administrateur) : aucun mot de passe n'est conserve,
+                # le connecteur ne recoit rien et n'est pas modifie (voir Invoke-CiwApplyConnector), l'ancien certificat n'est pas retire.
+                $pass = New-StrongPassword
                 try {
                     [void](Invoke-GraphPatch "/users/$($d.UserId)" @{ passwordProfile = @{ password = $pass; forceChangePasswordNextSignIn = $false } })
                 }
                 catch {
-                    $script:EntraLastError = ("ATTENTION - DESYNCHRONISATION : le connecteur Cloudiway a deja recu le NOUVEAU mot de passe du compte de service, mais le compte n'a pas pu etre mis a jour dans Entra ({0}). Le connecteur ne peut plus se connecter avec ce compte tant que ce n'est pas corrige : relancer la meme commande, sans -KeepCredentials (chaque execution renouvelle le certificat et le mot de passe et les envoie aux deux), ou reinitialiser le mot de passe du compte a la main et le ressaisir dans le connecteur." -f (Get-ErrMsg $_))
+                    $pass = $null
+                    $cred.Remove('ServiceAccountPassword')
+                    Set-EntraCtx 'ServiceAccountResetFailed' $true
+                    $script:EntraLastError = ("le mot de passe du compte de service n'a pas pu etre change dans Entra ({0}) : le connecteur garde l'ancien mot de passe et n'est PAS modifie (aucun nouveau mot de passe ni nouveau certificat ne lui est envoye ; le nouveau certificat deja ajoute a l'application est conserve pour la relance, l'ancien n'est pas retire). Relancer avec -KeepCredentials n'y change rien : reinitialisez le mot de passe du compte de service a la main (centre d'administration Microsoft Entra), puis ressaisissez-le dans le portail Cloudiway (champ du compte de migration du connecteur)." -f (Get-ErrMsg $_))
                     Write-RunLog $script:EntraLastError
                     return $false
                 }
-                Write-RunLog 'Mot de passe du compte de service reinitialise (apres ecriture du connecteur)'
+                $cred['ServiceAccountPassword'] = $pass
+                Set-EntraCtx 'ServiceAccountResetDone' $true
+                Write-RunLog 'Mot de passe du compte de service reinitialise dans Entra (avant l''ecriture du connecteur)'
                 return $true
             }
 
@@ -1537,7 +1576,7 @@ function Test-EntraCompliance {
             $u = $State.ServiceAccount
             & $row 'Compte de service' ([bool]$u) $(if ($u) { "$($u.userPrincipalName)" } else { 'absent' })
             if ($u) { & $row 'Etiquette du compte de service' ("$($u.employeeType)" -eq $script:EntraTag) $(if ("$($u.employeeType)" -eq $script:EntraTag) { 'employeeType = CloudiwayConnector' } else { 'compte non etiquete (adoption non appliquee)' }) }
-            foreach ($r in @(Get-RequiredEntraRoles -Mode $mode -Workloads $wl | Where-Object Target -EQ 'ServiceAccount')) {
+            foreach ($r in @(Get-RequiredEntraRoles -Mode $mode -Workloads $wl -WithoutServiceAccount:([bool](Get-EntraCtx 'WithoutServiceAccount')) | Where-Object Target -EQ 'ServiceAccount')) {
                 $has = ($u -and @($State.ServiceAccountRoles | Where-Object { $_ -ieq $r.TemplateId }).Count -gt 0)
                 & $row "Role $($r.Name) du compte de service" ([bool]$has) $(if ($has) { 'attribue' } else { 'non attribue' })
             }

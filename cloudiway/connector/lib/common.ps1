@@ -2,8 +2,8 @@
 # Ne contient AUCUN DELETE : le package ne supprime rien.
 
 $script:AppName = '3SR - Connecteurs Cloudiway'
-$script:AppVersion = '2.4'
-$script:AppDate = '31/10/2026'
+$script:AppVersion = '2.7'
+$script:AppDate = '04/11/2026'
 $script:AppContact = 'votre contact 3SR'
 $script:Plan = [System.Collections.Generic.List[object]]::new()
 $script:Results = [System.Collections.Generic.List[object]]::new()

@@ -377,6 +377,9 @@ function Invoke-CiwReauth {
         $tok = $null
         if ("$($a.Kind)" -eq 'Pat') {
             $tok = Get-CiwLoginToken -Pat $a.Pat
+        } elseif ($a.ContainsKey('Password') -and $a['Password'] -is [securestring]) {
+            # v2.6 (automatisation, -CloudiwayPassword) : copie du mot de passe fourni, aucune saisie ; liberee par Clear-CloudiwayState.
+            $tok = Get-CiwLoginToken -Login $a.Login -Password $a['Password']
         } else {
             Write-Status WARN 'Session Cloudiway expiree : reconnexion necessaire.' 'le mot de passe est redemande une seule fois (saisie masquee)'
             $pwd2 = Read-SecretText ("Mot de passe Cloudiway de {0} (session expiree, saisie masquee)" -f $a.Login)
@@ -509,6 +512,7 @@ function Clear-CloudiwayState {
     $script:CiwSecrets = @()
     $script:CiwLastError = ''
     $script:CiwNotices.Clear()
+    try { if ($script:CiwAuth -is [hashtable] -and $script:CiwAuth['Password'] -is [securestring]) { $script:CiwAuth['Password'].Dispose() } } catch { }   # v2.6 : copie du mot de passe d'automatisation
     $script:CiwAuth = $null
     $script:CiwReauthCount = 0
     $script:CiwPutCheck = $null
@@ -816,7 +820,7 @@ function New-ConnectorBody {
         [string]$ServiceAccountUpn,
         [string]$ServiceAccountPassword,
         [int]$Region = 1,
-        [ValidateSet('Certificate', 'Secret', 'Both')][string]$AuthMethod = 'Certificate',
+        [ValidateSet('Certificate', 'Secret', 'Both')][string]$AuthMethod = 'Both',
         [byte[]]$PfxBytes,
         [string]$PfxPassword,
         [string]$PfxFileName = 'cloudiway.pfx',
@@ -907,7 +911,7 @@ function Get-CiwDesired {
     $transport = "$(Get-CiwProp $ctx 'CertificateTransport')"
     if ($transport -notin 'Base64', 'Path') { $transport = 'Base64' }
     $auth = "$(Get-CiwProp $ctx 'AuthMethod')"
-    if ($auth -notin 'Certificate', 'Secret', 'Both') { $auth = 'Certificate' }
+    if ($auth -notin 'Certificate', 'Secret', 'Both') { $auth = 'Both' }
     $bytes = Get-CiwBytes $cred 'PfxBytes'
     if ($bytes -isnot [byte[]] -or $bytes.Length -eq 0) { $bytes = $null }
     $notAfter = Get-CiwProp $cred 'CertNotAfter'
@@ -989,7 +993,7 @@ function Get-CiwBlockReason($Detail, $Want) {
         $reg = Get-CiwProp $st 'ServerRegion'
         if ($null -ne $reg -and "$reg" -ne '' -and "$reg" -ne "$($Want.Region)") { return "le connecteur $id utilise la region $reg (region $($Want.Region) demandee) : la region d'un connecteur existant n'est jamais modifiee ; relancer avec -Region $reg pour la conserver, ou choisir un autre -ConnectorName." }
         $au = Get-CiwProp $st 'AuthenticationType'
-        if ($null -ne $au -and "$au" -ne '' -and "$au" -ne '3') { return "le connecteur $id utilise le type d'authentification $au (3 attendu : certificat) : jamais modifie par l'outil ; choisir un autre -ConnectorName, ou le corriger dans le portail Cloudiway (aucune option de l'outil ne change ce type)." }
+        if ($null -ne $au -and "$au" -ne '' -and "$au" -ne '3') { return "le connecteur $id utilise le type d'authentification $au (3 attendu : certificat et secret client) : jamais modifie par l'outil ; choisir un autre -ConnectorName, ou le corriger dans le portail Cloudiway (aucune option de l'outil ne change ce type)." }
         # M4 : collision de noms. Un connecteur de meme nom qui designe un AUTRE tenant ou une AUTRE application n'est pas le notre.
         if (-not [bool](Get-CiwProp $ctx 'AdoptExisting')) {
             $tn = "$(Get-CiwProp $st 'TenantName')"
@@ -1154,17 +1158,35 @@ function Confirm-CiwConnectorWrite {
 # v2.4 : l'ecriture n'est CONFIRMEE (ConnectorWriteOk) qu'apres relecture : connectorCertificate.fileName == nom envoye. Une reponse en erreur dont la
 # relecture est conforme est une ecriture confirmee ; un succes annonce dont le nom de fichier n'a pas change est un ECHEC (le portail n'a pas pris
 # le certificat en compte) ; une relecture impossible est traitee comme NON confirmee (aucun retrait, aucune reinitialisation du mot de passe).
+# v2.5 (D) : enveloppe. Si le mot de passe du compte de service a DEJA ete change dans Entra (il est reinitialise AVANT le connecteur) et que
+# l'ecriture du connecteur echoue, Entra et le connecteur ne sont plus d'accord : le dire dans le message d'echec (relancer resynchronise les deux).
 function Invoke-CiwApplyConnector {
+    $r = @(Invoke-CiwApplyConnectorCore)
+    $ok = ($r.Count -gt 0 -and $r[-1] -eq $true)
+    if (-not $ok -and [bool](Get-CiwProp $script:Ctx 'ServiceAccountResetDone')) {
+        $script:CiwLastError = (("" + $script:CiwLastError).TrimEnd() + ' ATTENTION - DESYNCHRONISATION POSSIBLE : le mot de passe du compte de service a deja ete change dans Entra (avant cette ecriture) et le connecteur ne l''a peut-etre pas recu. Relancer la meme commande, sans -KeepCredentials : elle reinitialise a nouveau le mot de passe et l''envoie au connecteur.')
+    }
+    return $ok
+}
+
+function Invoke-CiwApplyConnectorCore {
     $script:CiwLastError = ''
     $script:CiwPutCheck = $null
     $b = $null
     try {
         $c = $script:Ctx
-        # M2 : le nouveau mot de passe du compte de service est genere ICI (en memoire) pour etre envoye au connecteur d'abord ; le compte
-        # lui-meme n'est reinitialise qu'APRES le succes de l'ecriture du connecteur (ligne de plan "mot de passe", zone ServiceAccountPwd).
+        # v2.5 (D) : le mot de passe est reinitialise dans Entra AVANT (ligne de plan "mot de passe", zone ServiceAccountPwd, qui le depose dans les
+        # identifiants en memoire UNIQUEMENT si Entra l'a accepte). Refus ou absence : AUCUN mot de passe n'est envoye et AUCUN PUT n'est tente
+        # (un PUT sans MigrationAccountPassword pourrait effacer le mot de passe stocke : comportement du portail non mesure). Le renouvellement du
+        # certificat est alors ANNULE : rien n'est modifie cote connecteur, le nouveau certificat deja ajoute a l'application est conserve,
+        # l'ancien n'est pas retire (la zone Nettoyage depend de cette ligne).
         if ([bool](Get-CiwProp $c 'ServiceAccountResetPending')) {
             $crd = Get-CiwProp $c 'Credentials'
-            if ($crd -is [System.Collections.IDictionary] -and -not $crd['ServiceAccountPassword']) { $crd['ServiceAccountPassword'] = New-StrongPassword }
+            $haveSaPwd = ($crd -is [System.Collections.IDictionary] -and [bool]$crd['ServiceAccountPassword'])
+            if ([bool](Get-CiwProp $c 'ServiceAccountResetFailed') -or -not $haveSaPwd) {
+                Set-CiwError 'renouvellement du connecteur ANNULE : le mot de passe du compte de service n''a pas pu etre change dans Entra, donc aucun nouveau mot de passe ni nouveau certificat n''est envoye. Connecteur NON modifie (aucun PUT), il garde l''ancien certificat et l''ancien mot de passe ; le nouveau certificat deja ajoute a l''application est conserve et l''ancien n''est pas retire. Reinitialisez le mot de passe du compte de service a la main, ressaisissez-le dans le portail Cloudiway, puis relancez la meme commande.'
+                return $false
+            }
         }
         $d = Get-CiwDesired
         $cname = [string](Get-CiwProp (Get-CiwProp $c 'Names') 'Connector')
@@ -1198,6 +1220,7 @@ function Invoke-CiwApplyConnector {
                 Id = $id; Create = $false; ExpectedAccount = $(if ($d.ServiceAccountUpn) { "$($d.ServiceAccountUpn)" } else { "$(Get-CiwProp $stPre 'MigrationAccount')" })
                 ExpectedClientId = $(if ($d.AppId) { "$($d.AppId)" } else { "$(Get-CiwProp $stPre 'RestClientId')" })
                 CertSent = $sendCert; ExpectedFileName = $expectFile; CertId = "$(Get-CiwProp $ccPre 'id')"; CertFileName = "$(Get-CiwProp $ccPre 'fileName')"
+                SecretSent = [bool]($d.AuthMethod -in 'Secret', 'Both' -and $d.ClientSecret)
             }
             $verifyId = $id
             $method = 'PUT'; $path = "/Connectors/$id"
@@ -1214,7 +1237,7 @@ function Invoke-CiwApplyConnector {
                 -DefaultDomain (Get-CiwProp $c 'DefaultDomain') -AppId $d.AppId -ServiceAccountUpn $d.ServiceAccountUpn -ServiceAccountPassword $d.ServiceAccountPwd `
                 -Region $d.Region -AuthMethod $d.AuthMethod -PfxBytes $d.PfxBytes -PfxPassword $d.PfxPassword -PfxFileName $d.PfxFileName -ClientSecret $d.ClientSecret `
                 -ConnectorId 0 -Name $cname -CertificateTransport $d.Transport -ExternalKey $mk
-            $script:CiwPutCheck = [pscustomobject]@{ Id = 0; Create = $true; CertSent = $sendCert; ExpectedFileName = $expectFile; CertId = ''; CertFileName = '' }
+            $script:CiwPutCheck = [pscustomobject]@{ Id = 0; Create = $true; CertSent = $sendCert; ExpectedFileName = $expectFile; CertId = ''; CertFileName = ''; SecretSent = [bool]($d.AuthMethod -in 'Secret', 'Both' -and $d.ClientSecret) }
         }
 
         # Ecriture. Une erreur (reseau, timeout, 5xx, isSuccess faux) n'est PAS decisive : l'ecriture a pu aboutir (POST/PUT non rejoues).
@@ -1234,7 +1257,7 @@ function Invoke-CiwApplyConnector {
             Write-RunLog ("CIW relecture apres {0} : etat {1} (fichier relu '{2}', attendu '{3}') {4}" -f $method, $v.State, $v.FileName, $expectFile, $v.Detail)
             $respTxt = $(if ($respErr) { " Reponse du portail : $respErr" } else { '' })
             # Si un nouveau mot de passe de compte de service accompagnait le certificat, le portail a pu le prendre sans le certificat : le dire.
-            $pwTxt = $(if ([bool](Get-CiwProp $c 'ServiceAccountResetPending')) { ' Le nouveau mot de passe du compte de service a pu etre transmis au connecteur sans etre applique au compte : relancer la meme commande resynchronise les deux (certificat et mot de passe).' } else { '' })
+            $pwTxt = ''   # v2.5 : la mention de desynchronisation possible (mot de passe deja change dans Entra) est ajoutee par Invoke-CiwApplyConnector
             switch ($v.State) {
                 'Confirmed' {
                     if ($respErr) {
@@ -1244,11 +1267,11 @@ function Invoke-CiwApplyConnector {
                     return $true
                 }
                 'NotTaken' {
-                    Set-CiwError ("le portail n'a pas pris en compte le nouveau certificat (nom de fichier relu '{0}', attendu '{1}' ; {2}). Connecteur NON confirme : aucun ancien certificat n'est retire et le mot de passe du compte de service n'est pas reinitialise. Relancer l'outil ; si cela persiste, controler le connecteur dans le portail Cloudiway.{3}{4}" -f $v.FileName, $expectFile, $v.Detail, $respTxt, $pwTxt)
+                    Set-CiwError ("le portail n'a pas pris en compte le nouveau certificat (nom de fichier relu '{0}', attendu '{1}' ; {2}). Connecteur NON confirme : aucun ancien certificat n'est retire. Relancer l'outil ; si cela persiste, controler le connecteur dans le portail Cloudiway.{3}{4}" -f $v.FileName, $expectFile, $v.Detail, $respTxt, $pwTxt)
                     return $false
                 }
                 default {
-                    Set-CiwError ("ecriture du connecteur NON verifiable : {0}. Traitee comme NON confirmee : aucun ancien certificat n'est retire et le mot de passe du compte de service n'est pas reinitialise. Controler le connecteur dans le portail Cloudiway puis relancer l'outil.{1}{2}" -f $v.Detail, $respTxt, $pwTxt)
+                    Set-CiwError ("ecriture du connecteur NON verifiable : {0}. Traitee comme NON confirmee : aucun ancien certificat n'est retire. Controler le connecteur dans le portail Cloudiway puis relancer l'outil.{1}{2}" -f $v.Detail, $respTxt, $pwTxt)
                     return $false
                 }
             }
@@ -1293,7 +1316,8 @@ function New-CloudiwayConnectorPlan {
         }
         $want = Get-CiwDesired
         if (@($want.Unknown).Count -gt 0) {
-            $msg = "Produit(s) Cloudiway inconnu(s) pour : $(@($want.Unknown) -join ', '). Creer a la main un connecteur de test dans le portail avec toutes les charges cochees, lancer -Discover -ConnectorId <id> pour produire la table, puis relancer avec -ProductMapFile <fichier.json> ou -ProductIds <entiers>. Le cote tenant reste applique."
+            $nomin = ((@($want.Unknown) | ForEach-Object { $lbl = $(if ("$_" -eq 'SharePoint') { 'SharePoint (Sites)' } else { "$_" }); "l'identifiant du produit Cloudiway pour $lbl n'est pas connu" }) -join ' ; ')
+            $msg = "Produit(s) Cloudiway inconnu(s) pour : $(@($want.Unknown) -join ', ') : $nomin : lancez avec -ProductIds <liste> ou -ProductMapFile <fichier.json> (exemple : { ""SharePoint"": 12 }). Sans cela le produit ne serait PAS declare sur le connecteur et la charge ne serait pas visible. Pour le mesurer : creer a la main un connecteur de test dans le portail avec toutes les charges cochees, lancer -Discover -ConnectorId <id> pour produire la table, puis relancer avec -ProductMapFile <fichier.json> ou -ProductIds <entiers>. Le cote tenant reste applique."
             [void](Add-PlanItem $area $name 'BLOCKED' $msg)
             return
         }
@@ -1480,6 +1504,17 @@ function Test-CloudiwayCompliance {
                 if ($pc.ExpectedClientId) {
                     $rcNow = "$(Get-CiwProp $stNow 'RestClientId')"
                     $out.Add([pscustomobject]@{ Name = 'Connecteur Cloudiway : RestClientId'; Status = $(if ($rcNow -ieq $pc.ExpectedClientId) { 'OK' } else { 'KO' }); Detail = $(if ($rcNow -ieq $pc.ExpectedClientId) { 'RestClientId conforme apres la mise a jour' } else { "RestClientId apres la mise a jour : '$rcNow' (attendu '$($pc.ExpectedClientId)')" }) })
+                }
+            }
+            # v2.6 : secret client envoye (Both / Secret). Le portail MASQUE le secret a la lecture (fait mesure) : sa prise en compte n'est en general PAS
+            # verifiable ; si une lecture le donne en clair, il est compare a la valeur envoyee. Jamais de valeur dans le detail.
+            if ($pc.SecretSent) {
+                $secNow = if ($stNow) { "$(Get-CiwProp $stNow 'RestClientSecret')" } else { '' }
+                if ($secNow -and -not (Test-CiwMasked $secNow)) {
+                    $same = ("$($want.ClientSecret)" -ceq $secNow)
+                    $out.Add([pscustomobject]@{ Name = 'Connecteur Cloudiway : secret client'; Status = $(if ($same) { 'OK' } else { 'KO' }); Detail = $(if ($same) { 'secret client lisible et conforme a l''envoi' } else { 'le secret client relu est DIFFERENT de celui envoye' }) })
+                } else {
+                    $out.Add([pscustomobject]@{ Name = 'Connecteur Cloudiway : secret client'; Status = 'WARN'; Detail = 'le portail masque le secret client a la lecture : sa prise en compte n''est PAS verifiable ; la preuve est le demarrage de l''audit dans le portail Cloudiway (re-soumettre l''audit apres chaque mise a jour du connecteur)' })
                 }
             }
             $ccNow = Get-CiwProp $cur 'connectorCertificate'

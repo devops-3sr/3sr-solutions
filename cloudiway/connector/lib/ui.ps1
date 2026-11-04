@@ -125,8 +125,8 @@ function Show-Banner([string]$Mode, [string]$TenantId, [string]$User, [string]$O
     $inner = $ui.Width - 2
     $fc = 'Cyan'
     $name = Get-UIApp 'AppName' '3SR - Configuration du connecteur Cloudiway'
-    $ver  = Get-UIApp 'AppVersion' '2.4'
-    $date = Get-UIApp 'AppDate' '31/10/2026'
+    $ver  = Get-UIApp 'AppVersion' '2.7'
+    $date = Get-UIApp 'AppDate' '04/11/2026'
     $mail = Get-UIApp 'AppContact' 'votre contact 3SR'
 
     $modeTxt = ''
@@ -224,6 +224,17 @@ function Write-Hint([string]$Text) {
     foreach ($l in (Split-UIText $Text ($ui.Width - 6))) {
         Write-UIText ('  ' + $ui.C.Bullet + ' ' + $l) 'DarkGray'
     }
+}
+
+# v2.5 : AVERTISSEMENT VISIBLE (bloc en couleur, hors tableau) : titre sur fond d'alerte + lignes de texte. Ne bloque rien.
+function Write-Alert([string]$Title, [string[]]$Lines = @()) {
+    $ui = Get-UIState
+    Write-UIText ''
+    Write-UIText ('  ' + $ui.C.Bullet + ' AVERTISSEMENT - ' + $Title) 'Yellow'
+    foreach ($ln in @($Lines)) {
+        foreach ($l in (Split-UIText $ln ($ui.Width - 8))) { Write-UIText ('    ' + $l) 'Yellow' }
+    }
+    Write-UIText ''
 }
 
 # Ligne de commande a copier : toujours sur UNE ligne, jamais coupee.
@@ -365,7 +376,7 @@ function Read-MultiChoice([string]$Title, $Options, [string[]]$DefaultKeys = @()
         if ($opts[$i].Detail) { Write-UIText ('  ' + [string]$opts[$i].Detail) 'DarkGray' -NoNewline }
         Write-UIText ''
     }
-    Write-UIText "  Saisir les numeros ou les noms separes par des virgules (ex. 1,2 ou Mail,OneDrive), une plage (ex. 1-2) ou 'tout'." 'DarkGray'
+    Write-UIText "  Saisir les numeros ou les noms separes par des virgules (ex. 1,2 ou Mail,OneDrive), une plage (ex. 1-3) ou 'tout'." 'DarkGray'
     $defTxt = if (@($DefaultKeys).Count -gt 0) { ' [Entree = ' + (@($DefaultKeys) -join ', ') + ']' } else { '' }
     while ($true) {
         $ans = ''
@@ -478,7 +489,7 @@ function Format-Validity([int]$Days) {
 
 # Noms codifies (application, compte de service, connecteur, certificat) et duree de validite des identifiants.
 # $Names : { App; ServiceAccountLocal; ServiceAccountDisplay; Connector }. Aucun secret.
-function Show-CodedNames($Names, [string]$Mode, [string]$ProjectId, [string]$Domain, [bool]$NeedServiceAccount, [int]$ValidityDays, [string]$AuthMethod = 'Certificate', [string]$Title = 'Noms utilises (codifies : ils servent a la relance)') {
+function Show-CodedNames($Names, [string]$Mode, [string]$ProjectId, [string]$Domain, [bool]$NeedServiceAccount, [int]$ValidityDays, [string]$AuthMethod = 'Both', [string]$Title = 'Noms utilises (codifies : ils servent a la relance)') {
     if (-not $Names) { return }
     $items = [System.Collections.Generic.List[object]]::new()
     $items.Add(@('Application Entra', [string]$Names.App))

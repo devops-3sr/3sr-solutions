@@ -11,10 +11,13 @@ $script:Exo = $null
 
 function Reset-ExoState {
     $script:Exo = @{
-        Needed          = $false    # charges Mail / Archive choisies
+        Needed          = $false    # Charge Mail choisies
         ModuleOk        = $false    # module present (version suffisante)
         ModuleDetail    = ''
         Connected       = $false
+        Reused          = $false    # v2.5 : session Exchange Online EXISTANTE du meme tenant et du meme compte, reutilisee (aucune nouvelle connexion)
+        ForeignSession  = ''        # v2.5 : description d'une session Exchange Online d'un AUTRE tenant / compte ouverte dans la console ('' = aucune)
+        Session         = $null     # v2.5 : resultat de Get-ExoSessionState (controle precoce du script principal)
         ConnectError    = ''
         Read            = $false    # Get-OrganizationConfig lu avec succes
         ReadError       = ''
@@ -29,7 +32,7 @@ function Reset-ExoState {
 }
 Reset-ExoState
 
-# Charges qui exigent Exchange Online : Mail et Archive uniquement.
+# Charges qui exigent Exchange Online : Mail uniquement.
 function Test-ExchangeNeeded($Workloads) {
     $w = @($Workloads)
     return [bool](($w -contains 'Mail') -or ($w -contains 'Archive'))
@@ -67,7 +70,7 @@ function Get-ExoManualCommands([string]$AppId, [switch]$IncludeInstall, [switch]
         $c.Add('$ids = @((Get-OrganizationConfig).EwsAllowedAppIDs) + ''' + $app + '''')
         $c.Add('Set-OrganizationConfig -EwsAllowedAppIDs (($ids | Where-Object { $_ } | Select-Object -Unique) -join '','')')
     }
-    $c.Add('Disconnect-ExchangeOnline -Confirm:$false')
+    $c.Add('# Conseil : fermez la console PowerShell apres usage.')
     return @($c)
 }
 
@@ -86,21 +89,75 @@ function ConvertTo-ExoBool($Value) {
     return $null
 }
 
+# v2.5 (A) : sessions Exchange Online DEJA ouvertes dans cette console (Get-ConnectionInformation). Lecture seule, ne leve jamais.
+# Retourne { Foreign (bool : au moins une session d'un AUTRE tenant ou compte) ; Match (bool : une session du MEME tenant et du MEME compte, et aucune
+# autre) ; Detail (tenant / compte de la session etrangere, jamais de secret) }. On ne tente JAMAIS de reutiliser une session etrangere ni de la
+# fermer (Disconnect-ExchangeOnline fait planter le processus) : la regle est « une console PowerShell par tenant ».
+function Get-ExoSessionState {
+    [CmdletBinding()]
+    param([string]$Admin, [string]$TenantId)
+    $res = [pscustomobject]@{ Foreign = $false; Match = $false; Detail = '' }
+    try {
+        if (-not (Get-Command -Name Get-ConnectionInformation -ErrorAction SilentlyContinue)) { return $res }
+        $all = @(Get-ConnectionInformation -ErrorAction Stop | Where-Object { $_ })
+        $foreign = [System.Collections.Generic.List[string]]::new()
+        $same = 0
+        foreach ($ci in $all) {
+            $st = ''
+            try { $st = "$($ci.State)".Trim() } catch { }
+            if ($st -ieq 'Disconnected') { continue }
+            $gotTenant = "$($ci.TenantID)".Trim().ToLowerInvariant()
+            $gotUser = "$($ci.UserPrincipalName)".Trim().ToLowerInvariant()
+            $badTenant = ($TenantId -and $gotTenant -and $gotTenant -ne $TenantId.Trim().ToLowerInvariant())
+            $badUser = ($Admin -and $gotUser -and $gotUser -ne $Admin.Trim().ToLowerInvariant())
+            if ($badTenant -or $badUser) { $foreign.Add(("tenant {0}, compte {1}" -f $(if ($gotTenant) { $gotTenant } else { '?' }), $(if ($gotUser) { $gotUser } else { '?' }))) }
+            elseif ($gotTenant -or $gotUser) { $same++ }
+        }
+        if ($foreign.Count -gt 0) { $res.Foreign = $true; $res.Detail = ($foreign | Select-Object -Unique) -join ' ; ' }
+        elseif ($same -gt 0) { $res.Match = $true }
+    } catch { }
+    return $res
+}
+
+# Texte unique (console, plan, rapport) de l'etape Exchange impossible a cause d'une session d'un autre tenant.
+function Get-ExoForeignSessionText {
+    return 'une session Exchange Online d''un autre tenant est ouverte dans cette console : fermez cette console, ouvrez-en une NOUVELLE pour ce tenant (une console par tenant) puis relancez la meme commande.'
+}
+
 # Connexion Exchange Online avec le compte administrateur. Retourne { Ok; Error }. Ne leve jamais.
 # -UseDeviceCode : parametre -Device du module (code d'appareil). Controle du tenant (et du compte) si Get-ConnectionInformation existe.
 function Connect-ExchangeAdmin {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Admin, [string]$TenantId, [switch]$UseDeviceCode)
+    param([Parameter(Mandatory)][string]$Admin, [string]$TenantId, [switch]$UseDeviceCode, [securestring]$AccessToken, [string]$Organization)
+    $exoTokPlain = $null
     try {
         Import-Module $script:ExoModule -WarningAction SilentlyContinue -ErrorAction Stop
         $p = @{ UserPrincipalName = $Admin; ShowBanner = $false; ErrorAction = 'Stop'; WarningAction = 'SilentlyContinue' }
-        if ($UseDeviceCode) { $p['Device'] = $true }
+        if ($AccessToken) {
+            # v2.6 (automatisation) : jeton Exchange Online fourni. Tenant et compte controles dans SES revendications AVANT toute connexion (comme Graph) ;
+            # refus aussi s'il expire dans moins de 15 minutes (la session issue d'un jeton ne se renouvelle pas). Le texte du jeton n'est jamais journalise.
+            $exoTokPlain = ConvertFrom-SecureStringPlain $AccessToken
+            $cl = ConvertFrom-JwtPayload $exoTokPlain
+            $tTok = if ($cl) { "$($cl.tid)".Trim().ToLowerInvariant() } else { '' }
+            $aTok = (Get-JwtAccount $cl).Trim().ToLowerInvariant()
+            if (-not $cl -or -not $tTok) { throw 'jeton Exchange fourni illisible (revendications absentes) : refuse' }
+            if ($TenantId -and $tTok -ne $TenantId.Trim().ToLowerInvariant()) { throw ("jeton Exchange fourni refuse : tenant different de celui demande (attendu {0} ; jeton {1})" -f $TenantId, $tTok) }
+            if ($aTok -and $aTok -ne $Admin.Trim().ToLowerInvariant()) { throw ("jeton Exchange fourni refuse : compte different de celui demande (attendu {0} ; jeton {1})" -f $Admin, $aTok) }
+            $xe = Get-JwtExpiry $cl
+            if (-not $xe -or ($xe - [datetime]::UtcNow).TotalMinutes -lt 15) { throw 'jeton Exchange fourni expire ou presque (moins de 15 minutes, ou expiration illisible) : refuse' }
+            if (-not $Organization) { throw 'domaine .onmicrosoft.com initial du tenant inconnu : -Organization requis avec un jeton Exchange' }
+            $p['AccessToken'] = $exoTokPlain
+            $p['Organization'] = $Organization
+        }
+        elseif ($UseDeviceCode) { $p['Device'] = $true }
         Connect-ExchangeOnline @p | Out-Null
         $script:Exo.Connected = $true
     } catch {
         $m = ("" + $_.Exception.Message) -replace '\s+', ' '
         $script:Exo.Connected = $false
         return [pscustomobject]@{ Ok = $false; Error = $m }
+    } finally {
+        $exoTokPlain = $null; $p = $null
     }
     # Controle strict : le tenant (et le compte) obtenus doivent etre ceux demandes (meme logique que pour Graph).
     try {
@@ -151,7 +208,7 @@ function Read-ExchangeEws {
 # Etape "Exchange" du script principal, avant le plan : module, connexion, lecture. Retourne des lignes { Level; Text; Detail } a afficher.
 function Initialize-ExchangeState {
     [CmdletBinding()]
-    param([string]$Admin, [string]$TenantId, [switch]$UseDeviceCode)
+    param([string]$Admin, [string]$TenantId, [switch]$UseDeviceCode, [securestring]$AccessToken, [string]$Organization)
     $out = [System.Collections.Generic.List[object]]::new()
     $ex = $script:Exo
     if (-not $ex.Needed) { return @($out) }
@@ -160,16 +217,46 @@ function Initialize-ExchangeState {
         $out.Add([pscustomobject]@{ Level = 'WARN'; Text = "Module $($script:ExoModule) absent : l'etape Exchange (EWS) sera a faire a la main."; Detail = "le reste de la configuration continue ; $($ex.ModuleDetail)" })
         return @($out)
     }
-    $out.Add([pscustomobject]@{ Level = 'WAIT'; Text = $(if ($UseDeviceCode) { 'Connexion Exchange Online par code d''appareil : un code va s''afficher, a saisir sur https://microsoft.com/devicelogin.' } else { 'Connexion Exchange Online : une fenetre de connexion peut s''ouvrir.' }); Detail = "compte attendu : $Admin" })
-    $cn = Connect-ExchangeAdmin -Admin $Admin -TenantId $TenantId -UseDeviceCode:$UseDeviceCode
-    if (-not $cn.Ok) {
-        $ex.ConnectError = [string]$cn.Error
+    # v2.5 (A) : session deja ouverte dans la console. Autre tenant / autre compte : ni reutilisation ni deconnexion, etape manuelle. Meme tenant et
+    # meme compte : session reutilisee (pas de nouvelle connexion).
+    $ss = $ex.Session
+    if ($null -eq $ss) { $ss = Get-ExoSessionState -Admin $Admin -TenantId $TenantId }
+    if ($ss.Foreign) {
+        $ex.ForeignSession = [string]$ss.Detail
         $ex.PlanFailure = $true
-        $out.Add([pscustomobject]@{ Level = 'WARN'; Text = 'Connexion Exchange Online impossible : l''etape Exchange (EWS) sera a faire a la main.'; Detail = [string]$cn.Error })
+        $out.Add([pscustomobject]@{ Level = 'WARN'; Text = ('Etape Exchange (EWS) ignoree : ' + (Get-ExoForeignSessionText)); Detail = ('session trouvee : ' + [string]$ss.Detail + ' ; le reste de la configuration continue') })
         return @($out)
     }
-    $out.Add([pscustomobject]@{ Level = 'OK'; Text = 'Connecte a Exchange Online.'; Detail = 'lecture seule avant le plan' })
+    $cn = $null
+    if ($ss.Match) {
+        $ex.Connected = $true
+        $ex.Reused = $true
+        $out.Add([pscustomobject]@{ Level = 'OK'; Text = 'Session Exchange Online existante (meme tenant, meme compte) reutilisee.'; Detail = 'aucune nouvelle connexion' })
+    } else {
+        $out.Add([pscustomobject]@{ Level = 'WAIT'; Text = $(if ($AccessToken) { 'Connexion Exchange Online par jeton d''acces fourni (-ExchangeAccessToken) : aucune fenetre.' } elseif ($UseDeviceCode) { 'Connexion Exchange Online par code d''appareil : un code va s''afficher, a saisir sur https://microsoft.com/devicelogin.' } else { 'Connexion Exchange Online : une fenetre de connexion peut s''ouvrir.' }); Detail = "compte attendu : $Admin" })
+        $cn = Connect-ExchangeAdmin -Admin $Admin -TenantId $TenantId -UseDeviceCode:$UseDeviceCode -AccessToken $AccessToken -Organization $Organization
+        if (-not $cn.Ok) {
+            $ex.ConnectError = [string]$cn.Error
+            $ex.PlanFailure = $true
+            $out.Add([pscustomobject]@{ Level = 'WARN'; Text = 'Connexion Exchange Online impossible : l''etape Exchange (EWS) sera a faire a la main.'; Detail = [string]$cn.Error })
+            return @($out)
+        }
+        $out.Add([pscustomobject]@{ Level = 'OK'; Text = 'Connecte a Exchange Online.'; Detail = 'lecture seule avant le plan' })
+    }
     $rd = Read-ExchangeEws
+    if (-not $rd.Ok -and $ex.Reused) {
+        # La session reutilisee est inutilisable (jeton expire ?) : une connexion normale, une seule fois.
+        $ex.Reused = $false
+        $out.Add([pscustomobject]@{ Level = 'WAIT'; Text = 'La session existante ne repond pas : nouvelle connexion Exchange Online.'; Detail = "compte attendu : $Admin" })
+        $cn = Connect-ExchangeAdmin -Admin $Admin -TenantId $TenantId -UseDeviceCode:$UseDeviceCode -AccessToken $AccessToken -Organization $Organization
+        if (-not $cn.Ok) {
+            $ex.ConnectError = [string]$cn.Error
+            $ex.PlanFailure = $true
+            $out.Add([pscustomobject]@{ Level = 'WARN'; Text = 'Connexion Exchange Online impossible : l''etape Exchange (EWS) sera a faire a la main.'; Detail = [string]$cn.Error })
+            return @($out)
+        }
+        $rd = Read-ExchangeEws
+    }
     if (-not $rd.Ok) {
         $ex.ReadError = [string]$rd.Error
         $ex.PlanFailure = $true
@@ -199,6 +286,11 @@ function New-ExchangePlan {
     try { $allow = [bool]$script:Ctx.AllowEwsListCreation } catch { }
 
     # Etape impossible (module, connexion, lecture) : ligne IGNOREE, etape manuelle, code de sortie 2
+    if ($ex.PlanFailure -and $ex.ForeignSession) {
+        [void](Add-PlanItem 'Exchange' $name 'SKIP' ('session Exchange Online d''un autre tenant ouverte dans cette console : etape a faire a la main (voir A faire)'))
+        Add-ExoManual 'Exchange Online : une session d''un autre tenant est ouverte dans cette console (une console par tenant)' ((Get-ExoForeignSessionText) + " Session trouvee : $($ex.ForeignSession). Si vous preferez faire l'etape a la main, dans une console NOUVELLE : lire d'abord EwsAllowedAppIDs (si elle est deja renseignee, la reecrire complete de l'AppID ; si elle est VIDE, la definir la rend restrictive pour toutes les autres applications EWS du tenant). AppID a autoriser : $appTxt.") (Get-ExoManualCommands $appId -IncludeInstall:(-not $ex.ModuleOk) -IncludeWrite)
+        return
+    }
     if ($ex.PlanFailure) {
         $why = if (-not $ex.ModuleOk) { "module $($script:ExoModule) absent" } elseif ($ex.ConnectError) { 'connexion Exchange Online impossible' } else { 'lecture de la configuration EWS impossible' }
         $detail = if ($ex.ConnectError) { " ($($ex.ConnectError))" } elseif ($ex.ReadError) { " ($($ex.ReadError))" } else { '' }
