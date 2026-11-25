@@ -2,6 +2,15 @@
 
 All notable changes to this solution are documented here. Versions follow [Semantic Versioning](https://semver.org/). Release tags are named `cloudiway-collector-vX.Y.Z`.
 
+## Connector: known issues in 2.7 and earlier (2026-11-25)
+
+**Do not run the connector on a production tenant until a fixed version is published.** No script is changed by this entry: only a warning is added to the guides and to the connector readme.
+
+- `EwsAllowedAppIDs` is read without `Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy`, so an existing list can appear empty. A confirmed "creation" (or `-AllowEwsListCreation`), and the manual commands printed by the script or written in the guides, can then replace the list and cut off other EWS applications.
+- A new run on an already configured tenant can fail with HTTP 403 (scope `User-PasswordProfile.ReadWrite.All` not requested) and add one more certificate and client secret on each attempt.
+
+*Ne pas lancer le connecteur sur un tenant de production avant la publication d'une version corrigée : la liste EWS peut apparaître vide et être écrasée ; une relance peut échouer en 403 et ajouter des identifiants à l'application. Vérifier d'abord la liste avec la commande indiquée en tête des guides.*
+
 ## Connector [1.0.0] - 2026-11-04
 
 First public release of the **Cloudiway connector** (`connector/`), tag `cloudiway-connector-v1.0.0`. The script version is 2.7.
