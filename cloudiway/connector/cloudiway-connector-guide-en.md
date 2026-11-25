@@ -1,5 +1,21 @@
 # cloudiway-connector: user guide
 
+> [!CAUTION]
+> **Known issues in version 2.7 and earlier (2026-11-25). Do not run it on a production tenant until a fixed version is published.**
+>
+> 1. **The EWS list can be overwritten.** The script reads `EwsAllowedAppIDs` without the `-RetrieveEwsOperationAccessPolicy` switch of `Get-OrganizationConfig`, so an existing list can appear **empty**. If you then confirm the "creation" of the list (or use `-AllowEwsListCreation`), the write **replaces the existing list with a single application** and can cut off every other EWS application of the tenant.
+> 2. **Do not use the commands that read the list without this switch**, whether printed by the script ("To do", "To check") or written in sections [10](#10-the-exchange-online-ews-list) and [12](#12-removing-the-objects-at-the-end-of-the-project) of this guide: they have the same defect.
+> 3. **Running the script again on a configured tenant** can fail with HTTP 403 (the `User-PasswordProfile.ReadWrite.All` scope is not requested), and each attempt can add one more certificate and client secret to the application.
+>
+> **Check the real state (read-only)** after `Connect-ExchangeOnline`. If the switch is not recognised, do not conclude that the list is empty.
+>
+> ```powershell
+> Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy | Format-List EwsAllowedAppIDs
+> Get-OrganizationConfig | Format-List EwsEnabled
+> ```
+>
+> **Change nothing before you have read the list.** If version 2.7 or earlier already ran on your tenant and the list only contains the Cloudiway application while `EwsEnabled` is `True`, check with the tenant owner that no other EWS application lost access, and contact your usual 3SR contact.
+
 Version française : [cloudiway-connector-guide-fr.md](cloudiway-connector-guide-fr.md)
 
 `cloudiway-connector` is a PowerShell script that **configures a Microsoft 365 tenant** (a "source" or a "target") for a Cloudiway connector, then **creates or updates that connector** in your Cloudiway project. It replaces the series of manual steps described in the Cloudiway documentation (app registration, permissions, consent, Exchange roles, certificate, EWS list, service account, entering the connector in the portal).

@@ -1,5 +1,21 @@
 # cloudiway-connector : guide d'utilisation
 
+> [!CAUTION]
+> **Défauts connus de la version 2.7 et des précédentes (25/11/2026). Ne la lancez pas sur un tenant de production avant la publication d'une version corrigée.**
+>
+> 1. **La liste EWS peut être écrasée.** Le script lit `EwsAllowedAppIDs` sans le commutateur `-RetrieveEwsOperationAccessPolicy` de `Get-OrganizationConfig` : une liste existante peut donc apparaître **vide**. Si vous confirmez alors la « création » de la liste (ou utilisez `-AllowEwsListCreation`), l'écriture **remplace la liste existante par une seule application** et peut couper toutes les autres applications EWS du tenant.
+> 2. **N'utilisez pas les commandes qui lisent la liste sans ce commutateur**, qu'elles soient affichées par le script (« A faire », « A verifier ») ou écrites aux sections [10](#10-la-liste-ews-dexchange-online) et [12](#12-retirer-les-objets-en-fin-de-projet) de ce guide : elles ont le même défaut.
+> 3. **Relancer le script sur un tenant déjà configuré** peut échouer en HTTP 403 (la portée `User-PasswordProfile.ReadWrite.All` n'est pas demandée), et chaque essai peut ajouter un certificat et un secret client à l'application.
+>
+> **Vérifiez l'état réel (lecture seule)** après `Connect-ExchangeOnline`. Si le commutateur n'est pas reconnu, ne concluez pas que la liste est vide.
+>
+> ```powershell
+> Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy | Format-List EwsAllowedAppIDs
+> Get-OrganizationConfig | Format-List EwsEnabled
+> ```
+>
+> **Ne modifiez rien avant d'avoir lu la liste.** Si la version 2.7 ou une précédente a déjà été lancée sur votre tenant et que la liste ne contient que l'application Cloudiway alors que `EwsEnabled` vaut `True`, vérifiez avec le responsable du tenant qu'aucune autre application EWS n'a perdu son accès, et prévenez votre contact 3SR habituel.
+
 English version: [cloudiway-connector-guide-en.md](cloudiway-connector-guide-en.md)
 
 `cloudiway-connector` est un script PowerShell qui **configure un tenant Microsoft 365** (« source » ou « cible ») pour un connecteur Cloudiway, puis **crée ou met à jour ce connecteur** dans votre projet Cloudiway. Il remplace la suite d'opérations manuelles décrites dans la documentation Cloudiway (inscription d'application, permissions, consentement, rôles Exchange, certificat, liste EWS, compte de service, saisie du connecteur dans le portail).
