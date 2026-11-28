@@ -2,12 +2,12 @@
 
 <#
 .SYNOPSIS
-    Configure un tenant Microsoft 365 pour un connecteur Cloudiway (Source ou Cible ; Mail, OneDrive et SharePoint), puis cree ou met a jour le connecteur dans votre projet Cloudiway.
+    Configure un tenant Microsoft 365 pour un connecteur Cloudiway (Source ou Cible ; Mail, OneDrive, SharePoint et Teams), puis cree ou met a jour le connecteur dans votre projet Cloudiway.
 
 .DESCRIPTION
     Outil a lancer VOUS-MEME (DSI du client) dans une console pwsh (PowerShell 7.2 minimum), avec votre compte Administrateur general Microsoft 365 et
     votre compte Cloudiway (invitation recue par mail, role Contributor sur le projet). Sans parametre, l'outil pose des questions.
-    Il couvre les modes Source (tenant a migrer) et Cible (tenant de destination) et les charges Mail, OneDrive et SharePoint. Teams, Archive,
+    Il couvre les modes Source (tenant a migrer) et Cible (tenant de destination) et les charges Mail, OneDrive, SharePoint et Teams. Archive,
     GalSync, Intune, FreeBusy, Signature et MailRouting ne sont pas disponibles dans cette version. UNE CONSOLE POWERSHELL PAR TENANT : ne pas
     enchainer deux tenants dans la meme console (une session Exchange Online conservee d'un autre tenant rend l'etape EWS manuelle).
 
@@ -50,6 +50,17 @@
     l'outil demande alors une confirmation explicite separee (defaut NON), ou ne fait rien avec -Yes (sauf -AllowEwsListCreation). Si EwsEnabled
     vaut False (EWS desactive pour l'organisation), rien n'est ecrit : decision du tenant. Tout echec Exchange (module absent, connexion,
     ecriture) est non bloquant : l'etape devient un "A faire" manuel avec les commandes exactes et le code de sortie est 2.
+    Depuis la version 2.9 : la liste est lue avec Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy (sans ce commutateur elle sort VIDE
+    meme quand elle existe, et l'ecriture REMPLACE toute la liste) ; si le commutateur est indisponible ou si cette lecture echoue, l'outil
+    n'ecrit RIEN (etape manuelle, code 2). La valeur lue est sauvegardee dans run.log avant toute ecriture, avec la commande de retour arriere
+    (aussi dans le rapport) ; la liste est relue apres l'ecriture avec le meme commutateur. Un changement de liste prend effet en 24 h au plus
+    selon Microsoft. EwsEnabled = Null : la liste est ecrite mais ignoree tant que l'administrateur n'a pas active EWS (jamais fait par l'outil).
+
+    Relance (depuis la version 2.9) : la connexion Graph demande aussi la portee User-PasswordProfile.ReadWrite.All, necessaire pour
+    reinitialiser le mot de passe du compte de service existant ; si la session ne la porte pas, la ligne « Mot de passe » est BLOQUEE des le
+    plan. Le mot de passe est reinitialise AVANT la creation du certificat et du secret client : un refus ne laisse plus d'identifiant en
+    trop dans l'application. Une mise a jour du connecteur qui partirait sans le mot de passe du compte de migration (compte adopte,
+    -WithoutServiceAccount) ou sans le secret client est BLOQUEE (voir -ServiceAccountPassword et -AllowConnectorUpdateWithoutPassword).
 
     Verification apres ecriture (depuis la version 2.4) : le connecteur est RELU apres chaque POST / PUT (meme si la reponse est une erreur ou un delai
     depasse) ; l'ecriture n'est confirmee que si le nom de fichier du certificat relu est celui envoye (le portail remplace le certificat sur
@@ -57,6 +68,7 @@
 
     Codes de sortie : 0 = conforme ; 1 = arret avant toute ecriture (prerequis, acces, droits, refus, annulation, ou lignes bloquees sans
     rien d'applicable) ; 2 = applique avec des elements en echec, ignores, bloques ou non conformes (etape Exchange manuelle comprise).
+    Avec -WhatIf (depuis la version 2.9) : 0 si le plan ne contient aucune ligne bloquee, 1 s'il en contient (rien n'est jamais ecrit).
 
     Journalisation PowerShell d'entreprise : si le poste active le Module Logging / Script Block Logging / Transcription, PowerShell peut
     enregistrer les parametres des commandes et le contenu des scripts, independamment de cet outil. L'outil n'ecrit jamais de secret
@@ -87,15 +99,15 @@
     (obligatoire avec -SkipCloudiway, car il sert a nommer les objets).
 
 .PARAMETER Workloads
-    Charges de travail a migrer : Mail, OneDrive, SharePoint, ou All (= Mail, OneDrive et SharePoint). Demande si absent (question en console
+    Charges de travail a migrer : Mail, OneDrive, SharePoint, Teams, ou All (= ces quatre charges). Demande si absent (question en console
     interactive, exemple de reponse : 1,2 ou Mail,OneDrive). AUCUNE valeur par defaut : le choix est explicite (en mode questions, aucune
     charge n'est pre-selectionnee et chaque charge indique les privileges qu'elle ajoute ; sans console interactive, -Workloads est
-    obligatoire). Mail (Source et Cible), SharePoint et OneDrive en Cible creent un compte de service avec le role SharePoint Administrator. L'identifiant du produit
-    Cloudiway pour SharePoint est INCONNU a ce jour : sans -ProductIds ni fichier productmap.json (voir -ProductMapFile) qui le fournit, l'outil
-    s'ARRETE AU PLUS TOT (code 1), avant toute connexion et toute ecriture ; cela vaut aussi pour -Workloads All. Teams, Archive, GalSync,
-    Intune, FreeBusy, Signature et MailRouting sont refusees (« non disponible dans cette version »). Plusieurs valeurs separees par des
-    virgules ; avec "pwsh -File", la forme -Workloads Mail,OneDrive est acceptee (l'outil separe lui-meme les valeurs). Les permissions
-    demandees dependent uniquement de ce choix.
+    obligatoire). Mail (Source ET Cible), SharePoint, Teams et OneDrive en Cible creent un compte de service avec le role SharePoint
+    Administrator. SharePoint et Teams ajoutent des permissions d'application avec consentement administrateur, notamment en ECRITURE sur la
+    cible : ne demander que les charges necessaires. Identifiants de produit Cloudiway integres : Mail = 5, OneDrive = 6, SharePoint = 7
+    (confirme), Teams = 8 (provisoire) ; -ProductIds et productmap.json les surchargent. Archive, GalSync, Intune, FreeBusy, Signature et
+    MailRouting sont refusees (« non disponible dans cette version »). Plusieurs valeurs separees par des virgules ; avec "pwsh -File", la
+    forme -Workloads Mail,OneDrive est acceptee (l'outil separe lui-meme les valeurs). Les permissions demandees dependent uniquement de ce choix.
 .PARAMETER AuthMethod
     Both (DEFAUT, depuis la version 2.6) : certificat ET secret client, tous deux generes en memoire et envoyes au connecteur. Cloudiway l'EXIGE
     (page help.cloudiway.com/article/office-365-connector-configuration : "Client secret value, certificate-based authentication, and
@@ -141,13 +153,13 @@
     contient des identifiants de tenant : eviter un dossier synchronise ou partage (l'outil avertit).
 
 .PARAMETER ProductIds
-    Identifiants de produits Cloudiway (rawProductList) pour les charges dont le produit est inconnu. Plusieurs valeurs separees par des
-    virgules (ex. 5,6). Connus : Mail = 5, Fichiers (OneDrive) = 6. SharePoint : identifiant INCONNU a ce jour : sans -ProductIds ni fichier
-    de table de produits qui le fournit, l'outil s'arrete au plus tot (code 1), avant toute connexion.
+    Identifiants de produits Cloudiway (rawProductList) pour surcharger les valeurs par defaut ou fournir un produit inconnu. Plusieurs valeurs separees par des
+    virgules (ex. 5,6). Identifiants PAR DEFAUT integres (lus dans le portail Cloudiway, 2026-11-04) : Mail = 5, OneDrive = 6 (Fichiers), SharePoint = 7 (Site, confirme) ; Teams = identifiant 8, a confirmer par comparaison avec un connecteur cree par l'interface. Archive, GalSync et Intune : identifiant toujours INCONNU : sans -ProductIds ni -ProductMapFile qui le fournit, l'outil echoue vite a l'etape 1 (code 1, avant toute ecriture) ; -Workloads All echoue donc tant que ces trois produits sont inconnus.
+
 .PARAMETER ProductMapFile
-    Fichier JSON de correspondance charges de travail / produits Cloudiway, ex. { "SharePoint": 12 } (une charge -> un identifiant ou une liste).
-    Facultatif : sans ce parametre, un fichier productmap.json place a cote du script est utilise s'il existe (modele : productmap.example.json,
-    dont les valeurs sont FICTIVES : a remplacer par l'identifiant fourni par Cloudiway).
+    Fichier JSON de correspondance charges de travail / produits Cloudiway (produit par -Discover), ex. { "SharePoint": 12, "Teams": [13] }.
+    Facultatif : sans ce parametre, un fichier productmap.json place a cote du script est utilise s'il existe (modele : productmap.example.json).
+
 .PARAMETER Region
     Region serveur Cloudiway (ServerRegion) ecrite dans le connecteur. Defaut 1 (seule valeur validee en conditions reelles).
 .PARAMETER CertificateTransport
@@ -254,7 +266,9 @@ param(
     [string]$OutDir,
     [string[]]$ProductIds,
     [string]$ProductMapFile,
-    [ValidateRange(0, 99)][int]$Region = 1,
+    [ValidateRange(1, 99)][int]$Region = 1,   # v2.9 (m3) : 0 etait accepte puis remplace en silence par 1
+    [securestring]$ServiceAccountPassword,
+    [switch]$AllowConnectorUpdateWithoutPassword,
     [ValidateSet('Base64', 'Path')][string]$CertificateTransport = 'Base64',
     [switch]$UseDeviceCode,
     [switch]$AllowEwsListCreation,
@@ -293,8 +307,8 @@ if ($missingLibs.Count -gt 0) {
 foreach ($lf in $libFiles) { . (Join-Path $LibDir $lf) }
 # Identite de la version (prime sur les valeurs de lib\common.ps1)
 $script:AppName = '3SR - Configuration du connecteur Cloudiway'
-$script:AppVersion = '2.7'
-$script:AppDate = '04/11/2026'
+$script:AppVersion = '2.9'
+$script:AppDate = '25/11/2026'
 $ScriptVersion = [string]$script:AppVersion
 
 # Proxy d'entreprise : les appels HTTP de la session utilisent les identifiants Windows de l'utilisateur pour s'authentifier aupres du proxy.
@@ -312,20 +326,26 @@ if (-not $shouldGo -and -not $simulate) { Write-Host 'Operation annulee.' -Foreg
 # ====================================================================================================
 # m10 : valeur entouree d'apostrophes (apostrophes doublees) dans une commande a copier : un nom contenant un espace, un $ ou une apostrophe reste valide.
 function Format-QuotedArg([string]$Value) { return ("'" + ("$Value" -replace "'", "''") + "'") }
-$AllWorkloads = @('Mail', 'OneDrive', 'SharePoint')
-$DefaultWorkloads = @('Mail', 'OneDrive', 'SharePoint')
+$AllWorkloads = @('Mail', 'OneDrive', 'SharePoint', 'Teams')
+$DefaultWorkloads = @('Mail', 'OneDrive', 'SharePoint', 'Teams')
 # Charges reconnues par l'outil mais NON disponibles dans cette version : refusees avec un message clair.
-$script:UnavailableWorkloadNames = @('Archive', 'Teams', 'GalSync', 'Intune', 'FreeBusy', 'Signature', 'MailRouting')
+$script:UnavailableWorkloadNames = @('Archive', 'GalSync', 'Intune', 'FreeBusy', 'Signature', 'MailRouting')
 # Chaque charge indique les PRIVILEGES qu'elle ajoute (l'ecran de choix n'a aucune valeur pre-cochee : le DSI sait ce qu'il accorde).
 $WorkloadInfo = @(
     @{ Key = 'Mail'; Label = 'Mail'; Detail = 'boites aux lettres : lecture/ecriture des boites (full_access_as_app, Exchange.ManageAsApp), roles Exchange Administrator et Exchange Recipient Administrator pour l''application ; CREE aussi un compte de service (compte administrateur exige par Cloudiway) avec le role SharePoint Administrator, MEME en Source' }
     @{ Key = 'OneDrive'; Label = 'OneDrive'; Detail = 'OneDrive : acces aux fichiers de tous les utilisateurs (Files.ReadWrite.All, Sites.FullControl.All) ; en CIBLE : compte de service avec le role SharePoint Administrator' }
     @{ Key = 'SharePoint'; Label = 'SharePoint'; Detail = 'sites SharePoint : controle total des sites (Sites.FullControl.All) ; CREE un compte de service avec le role SharePoint Administrator' }
+    @{ Key = 'Teams'; Label = 'Teams'; Detail = 'equipes, canaux, conversations : lecture des messages (ChannelMessage.Read.All, Chat.Read.All...) ; CREE un compte de service avec le role SharePoint Administrator' }
 )
 # Scopes Graph d'ecriture demandes a la connexion de l'administrateur
+# v2.9 : User-PasswordProfile.ReadWrite.All est la portee la moins privilegiee pour modifier passwordProfile (documentation Microsoft Graph
+# « Update user », lue le 2026-11-25) ; User.ReadWrite.All ne suffit pas pour reinitialiser le mot de passe du compte de service a la RELANCE
+# (HTTP 403 constate le 2026-11-03 avec un Administrateur general). L'operateur doit EN PLUS etre Administrateur general ou Privileged Authentication
+# Administrator, car le compte de service detient un role d'administrateur. Effet reel de l'ajout : NON mesure (a valider sur le bac a sable).
+$PasswordScope = 'User-PasswordProfile.ReadWrite.All'
 $GraphScopes = @(
     'Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All',
-    'RoleManagement.ReadWrite.Directory', 'User.ReadWrite.All', 'Directory.Read.All', 'Policy.Read.All', 'Organization.Read.All'
+    'RoleManagement.ReadWrite.Directory', 'User.ReadWrite.All', $PasswordScope, 'Directory.Read.All', 'Policy.Read.All', 'Organization.Read.All'
 )
 # Ordre d'application et dependances entre zones
 # ServiceAccountPwd (v2.5) : reinitialisation du mot de passe du compte de service dans Entra AVANT l'ecriture du connecteur ; le
@@ -333,7 +353,10 @@ $GraphScopes = @(
 # Cette zone ne s'execute que si la ligne Cloudiway n'est pas deja BLOQUEE (sinon le compte changerait de mot de passe sans que le connecteur le recoive).
 # Cleanup : retrait des anciens certificats / secrets CREES PAR L'OUTIL, SEULEMENT apres l'ecriture reussie du
 # connecteur : si la ligne Cloudiway est en echec, ignoree ou bloquee, la ligne de nettoyage est ignoree et rien n'est retire.
-$AreaOrder = @('Application', 'ServicePrincipal', 'Permissions', 'Consent', 'Roles', 'Exchange', 'Certificate', 'ServiceAccount', 'ServiceAccountPwd', 'Cloudiway', 'Cleanup')
+# v2.9 : le compte de service et son mot de passe passent AVANT la creation du certificat et du secret client. En v2.8 le certificat et le
+# secret etaient ajoutes a l'application avant la reinitialisation du mot de passe : un refus (403) laissait un certificat et un secret de plus a
+# chaque relance. Desormais un refus du mot de passe (ou un compte de service en echec) = AUCUN identifiant cree dans l'application.
+$AreaOrder = @('Application', 'ServicePrincipal', 'Permissions', 'Consent', 'Roles', 'Exchange', 'ServiceAccount', 'ServiceAccountPwd', 'Certificate', 'Cloudiway', 'Cleanup')
 $AreaDeps = @{
     Cleanup          = @('Cloudiway', 'Certificate')   # DEPENDANCE-CONNECTEUR
     ServicePrincipal = @('Application')
@@ -341,7 +364,7 @@ $AreaDeps = @{
     Consent          = @('ServicePrincipal', 'Permissions')
     Roles            = @('ServicePrincipal')
     Exchange         = @('Application')   # etape non bloquante : aucune autre zone n'en depend
-    Certificate      = @('Application')
+    Certificate      = @('Application', 'ServiceAccount', 'ServiceAccountPwd')   # v2.9 (M1) : pas d'identifiant d'application si le compte ou son mot de passe est en echec / bloque
     ServiceAccount   = @()
     Cloudiway        = @('Application', 'Certificate', 'ServiceAccount')   # le refus du mot de passe (ServiceAccountPwd) est traite par une garde dans Invoke-CiwApplyConnector
     ServiceAccountPwd = @('Cloudiway', 'ServiceAccount')   # v2.5 : s'execute AVANT Cloudiway ; ne depend que des lignes BLOQUEES de Cloudiway (voir $bad initial)
@@ -373,6 +396,8 @@ function Clear-RunSecrets {
     $script:GraphAccessToken = $null
     $script:ExchangeAccessToken = $null
     $script:CloudiwayPassword = $null
+    $script:ServiceAccountPassword = $null   # v2.9 : mot de passe du compte adopte (reference annulee, jamais Dispose)
+    try { if ($script:Ctx -is [System.Collections.IDictionary]) { $script:Ctx['ProvidedServiceAccountPassword'] = $null } } catch { }
     try { if (Get-Command -Name Clear-CloudiwayState -ErrorAction SilentlyContinue) { Clear-CloudiwayState } } catch { }
 }
 
@@ -646,6 +671,17 @@ function New-ReportMarkdown($PlanItems, $ResultItems, $VerifRows, [bool]$IsSimul
         $v = Get-SafeProp $c.Created $k
         if ($v) { $valLines.Add("- ${k} : ``$v``") }
     }
+    # v2.8 : produits Cloudiway declares sur le connecteur (identifiants par defaut lus dans lib\permissions.ps1 ; surcharges -ProductIds / -ProductMapFile)
+    if (-not $c.SkipCloudiway -and -not $c.Discover -and -not $IsSimulation) {
+        try {
+            $gpR = @{ Workloads = @($c.Workloads) }
+            if (@($c.ProductIds).Count -gt 0) { $gpR['Override'] = [int[]]@($c.ProductIds) }
+            if ($c.ProductMapFile) { $gpR['MapFile'] = [string]$c.ProductMapFile }
+            $prodR = Get-ProductIds @gpR
+            $srcTxt = switch ([string]$prodR.Source) { 'override' { 'surcharge -ProductIds' } 'fichier' { 'surcharge -ProductMapFile / productmap.json' } default { 'valeurs par defaut integrees' } }
+            if (@($prodR.Ids).Count -gt 0) { $valLines.Add(("- Produits Cloudiway declares : [{0}] ({1})" -f (@($prodR.Ids) -join ','), $srcTxt)) }
+        } catch { }
+    }
     if ($script:CredExpiry -is [datetime]) { $valLines.Add(("- Expiration du {0} du connecteur : {1:yyyy-MM-dd}" -f $(if ($script:CredKind -in 'secret client', 'certificat et secret client') { $script:CredKind } else { 'certificat' }), $script:CredExpiry)) }
     $removed = @(Get-SafeProp $c.Created 'CleanupRemoved' | Where-Object { $_ })
     if ($removed.Count -gt 0) {
@@ -745,7 +781,7 @@ foreach ($p in $prodIn) {
     $ProductIdList += $n
 }
 # v2.5 (E) : table de produits facultative. Sans -ProductMapFile, le fichier productmap.json place a cote du script (s'il existe) est utilise.
-# Format : { "SharePoint": 12 } (une charge de travail -> un identifiant ou une liste). Le fichier est controle AVANT toute connexion.
+# Format : { "SharePoint": 12, "Teams": [13] } (une charge de travail -> un identifiant ou une liste). Le fichier est controle AVANT toute connexion.
 if (-not $ProductMapFile -and -not $Discover) {
     $autoMap = Join-Path $PSScriptRoot 'productmap.json'
     if (Test-Path -LiteralPath $autoMap -PathType Leaf) { $ProductMapFile = $autoMap }
@@ -760,7 +796,7 @@ if ($ProductMapFile) {
             foreach ($pv in @($pp.Value)) { $pn = 0; if ($null -eq $pv -or -not [int]::TryParse("$pv", [ref]$pn)) { throw "valeur non numerique pour '$($pp.Name)'" } }
         }
     } catch { $pmErr = ("" + $_.Exception.Message) -replace '\s+', ' ' }
-    if ($pmErr) { Write-Status FAIL "Table de produits illisible ($ProductMapFile)." "$pmErr. Format attendu : { ""SharePoint"": 12 }"; Stop-Run 1 }
+    if ($pmErr) { Write-Status FAIL "Table de produits illisible ($ProductMapFile)." "$pmErr. Format attendu : { ""SharePoint"": 12, ""Teams"": [13] }"; Stop-Run 1 }
 }
 if ($Tenant) {
     $Tenant = $Tenant.Trim()
@@ -824,7 +860,7 @@ if ($missing.Count -gt 0 -and -not $interactive) {
         $cmdParts.Add('-Mode ' + $(if ($Mode) { $Mode } else { '<Source|Target>' }))
         $cmdParts.Add('-Tenant ' + $(if ($Tenant) { Format-QuotedArg $Tenant } else { '<contoso.onmicrosoft.com>' }))
         $cmdParts.Add('-Admin365 ' + $(if ($Admin365) { Format-QuotedArg $Admin365 } else { '<admin365@contoso.com>' }))
-        $cmdParts.Add('-Workloads ' + $(if (@($Workloads).Count -gt 0) { (@($Workloads) | ForEach-Object { Format-QuotedArg $_ }) -join ',' } else { '<Mail,OneDrive,SharePoint>' }))
+        $cmdParts.Add('-Workloads ' + $(if (@($Workloads).Count -gt 0) { (@($Workloads) | ForEach-Object { Format-QuotedArg $_ }) -join ',' } else { '<Mail,OneDrive,...>' }))
     }
     if ($SkipCloudiway) {
         $cmdParts.Add('-SkipCloudiway')
@@ -873,7 +909,7 @@ if (-not $Discover) {
     if (@($Workloads).Count -eq 0) {
         # AUCUNE valeur pre-cochee : Entree seule est refusee, chaque charge nomme les privileges qu'elle ajoute.
         Write-UIText '' ''
-        Write-UIText '  Chaque charge ajoute des privileges dans votre tenant (detailles ci-dessous). Mail (Source ET Cible), SharePoint (et OneDrive en Cible) creent un compte de service avec le role SharePoint Administrator. Rien n''est pre-selectionne. Teams, Archive, GalSync, Intune, FreeBusy, Signature et MailRouting ne sont pas disponibles dans cette version.' 'Yellow'
+        Write-UIText '  Chaque charge ajoute des privileges dans votre tenant (detailles ci-dessous). Mail (Source ET Cible), SharePoint, Teams et OneDrive en Cible creent un compte de service avec le role SharePoint Administrator. Rien n''est pre-selectionne. Archive, GalSync, Intune, FreeBusy, Signature et MailRouting ne sont pas disponibles dans cette version.' 'Yellow'
         $Workloads = @(Read-MultiChoice 'Quelles charges de travail faut-il migrer ? (les permissions demandees en dependent)' $WorkloadInfo @())
         $askedAny = $true
     }
@@ -913,7 +949,7 @@ if ($OutDir) {
         $OutRisk = Test-RiskyOutputFolder $OutBase
     }
 }
-$Stamp = Get-Date -Format 'yyyyMMdd-HHmm'
+$Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # v2.9 : a la seconde ; deux lancements dans la meme minute ne partagent plus run.log ni le rapport
 # Nom court provisoire (le vrai nom court vient du domaine par defaut du tenant, connu apres la connexion)
 $EarlyShort = ''
 if (-not $Discover -and $Tenant) {
@@ -950,6 +986,11 @@ $script:Ctx = @{
     OutBase              = $OutBase
     WhatIf               = $simulate
     AllowEwsListCreation = [bool]$AllowEwsListCreation   # v2.2 : liste EwsAllowedAppIDs vide -> creation autorisee sans question
+    ProvidedServiceAccountPassword = $ServiceAccountPassword   # v2.9 (M2) : mot de passe d'un compte de service ADOPTE (SecureString, memoire seulement, jamais affiche)
+    AllowConnectorUpdateWithoutPassword = [bool]$AllowConnectorUpdateWithoutPassword   # v2.9 (M2) : usage avance, effet du portail non mesure
+    PasswordlessPutReason = ''                           # v2.9 (M2) : raison du blocage de la mise a jour du connecteur (calculee avec la decision des identifiants)
+    PasswordScopeMissing = $false                        # v2.9 (C1) : portee User-PasswordProfile.ReadWrite.All absente de la session Graph
+    GraphGrantedScopes   = @()                           # v2.9 (C1) : portees reellement accordees a la session Graph (lues avant le plan)
     Yes                  = [bool]$Yes
     DefaultDomain        = $null
     TenantShort          = $ProvShort         # prefixe complet du domaine .onmicrosoft.com (apres connexion)
@@ -1327,6 +1368,29 @@ if ($GraphAccessToken -and $script:DeviceClaims) {
         Write-StatusLog WARN ('Portee(s) absente(s) du jeton Graph fourni : ' + (@($script:Ctx.GraphTokenMissingScopes) -join ', ')) $(if ($haveScp.Count -eq 0) { 'aucune revendication scp lisible : toutes les portees sont considerees absentes' } else { 'les etapes concernees seront tolerantes ou echoueront avec un message nommant la portee (rien n''est devine)' })
     }
 }
+# v2.9 : portees REELLEMENT accordees a la session, lues AVANT le plan : revendication scp du jeton (jeton fourni, code d'appareil), sinon
+# contexte du module (connexion interactive). Si elles sont connues et que la portee de reinitialisation de mot de passe manque, la ligne
+# « Mot de passe » du plan est BLOQUEE avec un message clair (au lieu d'un HTTP 403 pendant l'application). Portees inconnues : rien n'est suppose,
+# la garde v2.5 reste le filet. Directory.AccessAsUser.All (jetons Azure CLI) couvre aussi la reinitialisation.
+$script:Ctx.GraphGrantedScopes = @()
+$script:Ctx.PasswordScopeMissing = $false
+try {
+    $granted = @()
+    if (($UseDeviceCode -or $GraphAccessToken) -and $script:DeviceClaims) {
+        $scpP = $script:DeviceClaims.PSObject.Properties['scp']
+        if ($scpP) { $granted = @("$($scpP.Value)" -split '\s+' | Where-Object { $_ }) }
+        $scopesKnown = [bool]$GraphAccessToken -or ($granted.Count -gt 0)   # jeton fourni sans scp lisible : toutes les portees sont considerees absentes
+    } else {
+        $granted = @($mc.Scopes | Where-Object { $_ })
+        $scopesKnown = ($granted.Count -gt 0)
+    }
+    $script:Ctx.GraphGrantedScopes = @($granted)
+    if ($scopesKnown -and @($granted | Where-Object { $_ -ieq $PasswordScope -or $_ -ieq 'Directory.AccessAsUser.All' }).Count -eq 0) {
+        $script:Ctx.PasswordScopeMissing = $true
+        Write-StatusLog WARN "Portee $PasswordScope absente de la session Graph." 'le mot de passe d''un compte de service EXISTANT ne pourra pas etre reinitialise : la ligne « Mot de passe » sera BLOQUEE dans le plan (aucun certificat ni secret ne sera cree, le connecteur ne sera pas modifie)'
+    }
+    Write-RunLog ("Portees Graph de la session : {0}" -f $(if ($granted.Count -gt 0) { $granted -join ' ' } else { '(non lisibles)' }))
+} catch { Write-RunLog ("Portees Graph de la session non lues : " + (Get-ErrMsg $_)) }
 # v2.6 : jeton Graph fourni : refus immediat (avant tout plan et toute ecriture) s'il expire dans moins de 15 minutes (ou n'a pas d'expiration lisible).
 if ($GraphAccessToken) {
     $gExp0 = Get-JwtExpiry $script:DeviceClaims
@@ -1402,7 +1466,8 @@ if ($script:Exo.Needed) {
     Write-Host ''
     Write-Host '  Exchange Online (Charge Mail) :'
     foreach ($ln in @(Initialize-ExchangeState -Admin $Admin365 -TenantId $TenantGuid -UseDeviceCode:$UseDeviceCode -AccessToken $ExchangeAccessToken -Organization ([string]$script:Ctx.DefaultDomain))) { Write-StatusLog ([string]$ln.Level) ([string]$ln.Text) ([string]$ln.Detail) }
-    if ($script:Exo.Read) { Write-RunLog ("EXO config EWS : EwsEnabled={0} liste={1} entree(s) ; {2}" -f $script:Exo.EwsEnabled, @($script:Exo.EwsList).Count, $script:Exo.Legacy) }
+    # v2.9 : la liste est lue AVEC -RetrieveEwsOperationAccessPolicy ; son contenu (des AppID, aucun secret) est journalise des la lecture (valeur de reference).
+    if ($script:Exo.Read) { Write-RunLog ("EXO config EWS : EwsEnabled=[{0}] listeLue={1} liste={2} entree(s) [{3}] ; {4}" -f $script:Exo.EwsEnabled, [bool]$script:Exo.ListOk, @($script:Exo.EwsList).Count, (@($script:Exo.EwsList) -join ','), $script:Exo.Legacy) }
 }
 
 # ====================================================================================================
@@ -1458,10 +1523,12 @@ foreach ($exIt in @($script:Plan | Where-Object { [string]$_.Area -eq 'Exchange'
     } else {
         $exIt.Action = 'SKIP'
         $exIt.Apply = $null
-        $exIt.Reason = 'liste vide : creation non confirmee, rien n''est ecrit (voir A verifier)'
+        $exIt.Reason = 'IGNORE : creation refusee (liste vide), l''outil n''a RIEN ecrit (voir A verifier)'
+        # v2.8 (C) : la ligne apparait aussi dans « Application » avec le resultat IGNORE (jamais APPLIQUE) ; elle ne compte pas dans les ignores (code de sortie inchange).
+        $script:Results.Add([pscustomobject]@{ Id = $exIt.Id; Area = 'Exchange'; Name = $exIt.Name; Action = 'UPDATE'; Outcome = 'IGNORE'; Detail = 'IGNORE : creation de la liste EwsAllowedAppIDs refusee a la question de confirmation (defaut NON) : rien n''est ecrit dans Exchange' })
         $exApp = Get-AppIdText; if (-not $exApp) { $exApp = '<AppID>' }
-        Add-ExoVerify 'Mail : EwsAllowedAppIDs est vide, AppID non inscrit' ("Creation de la liste non confirmee : l'outil n'a RIEN ecrit. Definir une liste vide la rend restrictive pour toutes les autres applications EWS du tenant. Decision de l'administrateur Exchange : inscrire aussi les autres applications utiles, ou relancer avec -AllowEwsListCreation. AppID : $exApp.") @('Get-OrganizationConfig | Select-Object EwsEnabled, EwsAllowedAppIDs', ('$ids = @((Get-OrganizationConfig).EwsAllowedAppIDs) + ''' + $exApp + ''''), 'Set-OrganizationConfig -EwsAllowedAppIDs (($ids | Where-Object { $_ } | Select-Object -Unique) -join '','')')
-        Write-StatusLog INFO 'EWS : creation de la liste non confirmee, rien n''est ecrit.'
+        Add-ExoVerify 'Mail : EwsAllowedAppIDs est vide, AppID non inscrit' ("Creation de la liste REFUSEE a la question de confirmation (defaut NON). L'outil n'a RIEN ecrit dans Exchange. Definir une liste vide la rend restrictive pour toutes les autres applications EWS du tenant. Decision de l'administrateur Exchange : inscrire aussi les autres applications utiles, ou relancer avec -AllowEwsListCreation. Prise d'effet d'un changement de liste : jusqu'a 24 h. AppID : $exApp.") (@(Get-ExoReadCommands) + @(Get-ExoWriteCommands $exApp))
+        Write-StatusLog INFO 'EWS : creation de la liste REFUSEE : IGNORE, l''outil n''a RIEN ecrit.'
     }
 }
 $actionable = @($script:Plan | Where-Object { $_.Action -in 'CREATE', 'UPDATE' })
@@ -1577,9 +1644,11 @@ if ($simulate) {
             if ($script:EntraLastError) { $detail = [string]$script:EntraLastError }
             elseif ($script:CiwLastError) { $detail = [string]$script:CiwLastError }
         }
+        # v2.9 : la note d'application (ex. cles retirees : keyId et empreinte, jamais de secret) est affectee AVANT l'ajout du resultat ;
+        # en v2.8 elle l'etait apres et n'apparaissait donc jamais dans la colonne Detail du rapport.
+        if ($outcome -eq 'APPLIQUE' -and $script:EntraApplyNote) { $detail = [string]$script:EntraApplyNote }
         $script:Results.Add([pscustomobject]@{ Id = $it.Id; Area = $area; Name = $it.Name; Action = $it.Action; Outcome = $outcome; Detail = $detail })
         if ($outcome -eq 'APPLIQUE') {
-            if ($script:EntraApplyNote) { $detail = [string]$script:EntraApplyNote }   # ex. cles retirees : keyId et empreinte (jamais de secret)
             $applied++
             Write-StatusLog OK $label "($style)"
         } else {
@@ -1646,6 +1715,11 @@ Save-CredentialExpiry
 $script:FinalNotices = @(try { Get-CloudiwayNotices } catch { @() })
 $script:FinalDesyncNotes = @($script:Results | Where-Object { [string]$_.Area -eq 'ServiceAccountPwd' -and [string]$_.Outcome -eq 'ECHEC' } | ForEach-Object { [string]$_.Detail })
 $script:FinalResyncNotes = @($script:Results | Where-Object { [string]$_.Area -eq 'Cloudiway' -and [string]$_.Outcome -eq 'ECHEC' -and [string]$_.Detail -match 'DESYNCHRONISATION POSSIBLE' } | ForEach-Object { [string]$_.Detail })
+# v2.9 (M1) : le mot de passe est desormais reinitialise AVANT la creation du certificat et du secret. S'il a ete change dans Entra et que le connecteur
+# n'a pas ete ecrit ensuite (identifiant de l'application en echec, ligne Cloudiway ignoree), Entra et le connecteur ne sont plus d'accord : le dire.
+if (-not $simulate -and [bool]$script:Ctx.ServiceAccountResetDone -and -not [bool]$script:Ctx.ConnectorWriteOk -and @($script:FinalResyncNotes).Count -eq 0) {
+    $script:FinalResyncNotes = @('DESYNCHRONISATION POSSIBLE : le mot de passe du compte de service a ete change dans Entra, mais le connecteur Cloudiway n''a pas ete ecrit dans ce passage (etape suivante en echec ou ignoree) : il garde l''ancien mot de passe et les jobs qui utilisent ce compte echoueront. Relancer la meme commande, sans -KeepCredentials : elle reinitialise a nouveau le mot de passe et l''envoie au connecteur.')
+}
 
 # Les identifiants generes ne servent plus : effaces de la memoire AVANT d'ecrire le rapport
 Clear-RunSecrets
@@ -1668,6 +1742,11 @@ $exitCode = 0
 if (-not $simulate) {
     $dirty = ($failed -gt 0 -or $ignored -gt 0 -or $blockedItems.Count -gt 0 -or $nonCompliant -gt 0)
     if ($dirty) { $exitCode = if ((($applied + $failed) -eq 0) -and $blockedItems.Count -gt 0) { 1 } else { 2 } }
+}
+else {
+    # v2.9 : en simulation, un plan qui contient des lignes BLOQUEES (hors lignes purement informatives) sort en 1 : une automatisation qui
+    # lance -WhatIf avant l'application reelle peut s'y fier (en v2.8 la simulation sortait toujours en 0).
+    if (@($blockedItems | Where-Object { -not (Test-InformativeBlock $_) }).Count -gt 0) { $exitCode = 1 }
 }
 Stop-Run $exitCode
 

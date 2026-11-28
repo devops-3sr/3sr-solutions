@@ -90,24 +90,29 @@ $script:EntraRoleTemplates = @{
     SharePointAdministrator        = 'f28a1f50-f6e7-4571-818b-6a12f2af6b6c'
 }
 # V2 : roles Exchange Administrator et Exchange Recipient Administrator sur l'APPLICATION, pour le Mail seulement.
-$script:WorkloadsNeedingExchangeRoles = @('Mail')
+# v2.9 : Archive est alignee sur Mail (memes permissions Exchange) : sans ces deux roles sur le principal de service,
+# Exchange.ManageAsApp est sans effet. Verifie dans la documentation Cloudiway relue le 2026-11-25 :
+# Exchange Administrator et Exchange Recipient Administrator sont a attribuer au PRINCIPAL DE SERVICE de l'application pour le courrier.
+$script:WorkloadsNeedingExchangeRoles = @('Mail', 'Archive')
 # V2 : compte de service (utilisateur, role SharePoint Administrator) requis, par mode :
 #   Mail en source et en cible (v2.7, compte administrateur exige par Cloudiway) ; OneDrive en CIBLE seulement (flux ROPC) ;
 #   Teams et SharePoint en source et en cible.
 # v2.7 : le courrier (Mail) exige AUSSI le compte administrateur (MigrationAccount + MigrationAccountPassword), en Source comme en Cible
 # (constat reel 2026-11-04 : sans lui l'audit Cloudiway ne demarre pas ; avec lui l'audit va au bout).
 $script:WorkloadsNeedingServiceAccount = @{
-    Source = @('Mail', 'SharePoint', 'Teams')
-    Target = @('Mail', 'OneDrive', 'SharePoint', 'Teams')
+    Source = @('Mail', 'Archive', 'SharePoint', 'Teams')             # v2.9 (m4) : Archive comme Mail
+    Target = @('Mail', 'Archive', 'OneDrive', 'SharePoint', 'Teams')
 }
 
 # --- Produits Cloudiway (rawProductList). $null = inconnu ---
-# v2.5 (E) : SharePoint et Teams = INCONNUS ($null) tant que l'identifiant n'a pas ete MESURE sur un vrai portail (premier client reel, 2026-11-03 :
+# v2.8 : SharePoint et Teams ont des VALEURS PAR DEFAUT integrees (constantes ci-dessous) (lues dans le portail le 2026-11-04) ; -ProductIds / -ProductMapFile / productmap.json restent
+# des surcharges. Archive, GalSync, Intune restent INCONNUS ($null) : echec rapide a l'etape 1 tant que l'identifiant n'est pas fourni.
+# (Historique v2.5 (E) : SharePoint et Teams = INCONNUS ($null) tant que l'identifiant n'a pas ete MESURE sur un vrai portail (premier client reel, 2026-11-03 :
 # les connecteurs n'ont que [5,6], donc 6 ne distingue pas SharePoint). Le mapper sur 6 donnait l'illusion d'un support : la ligne Cloudiway
 # est desormais BLOQUEE tant que l'identifiant n'est pas fourni (-ProductIds ou -ProductMapFile, ou fichier facultatif productmap.json du package).
 # UNE seule constante a changer quand l'identifiant est connu (ex. $script:ProductIdSharePoint = 12) :
-$script:ProductIdSharePoint = $null
-$script:ProductIdTeams = $null
+$script:ProductIdSharePoint = 7   # "Site" : VALIDE en reel le 2026-11-04 (case « Site » cochee dans le portail apres ecriture d'un connecteur [5,6,7])
+$script:ProductIdTeams = 8        # PROVISOIRE : valeur definie ICI et nulle part ailleurs (script, tests et documentation la lisent) ; a confirmer par comparaison avec un connecteur cree par l'interface du portail
 $script:ProductTable = [ordered]@{
     Mail       = 5
     Archive    = $null

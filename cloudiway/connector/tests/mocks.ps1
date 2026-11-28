@@ -50,8 +50,8 @@ function global:New-MockOAuthError([string]$OAuthError, [string]$Description) {
     $er
 }
 # v2.6 : jeton JWT factice (non signe) portant tid, compte (upn ou preferred_username) et expiration (secondes dans le futur) : pour -GraphAccessToken / -ExchangeAccessToken.
-function global:New-MockJwt([string]$Tid = $global:MockTenantId, [string]$Account = $global:MockUser, [int]$LifetimeSec = 3600, [switch]$NoUpn, [string]$Scp = 'Application.ReadWrite.All AppRoleAssignment.ReadWrite.All DelegatedPermissionGrant.ReadWrite.All RoleManagement.ReadWrite.Directory User.ReadWrite.All Directory.Read.All Policy.Read.All Organization.Read.All') {
-    $b64 = { param($o) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($o | ConvertTo-Json -Compress))).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
+function global:New-MockJwt([string]$Tid = $global:MockTenantId, [string]$Account = $global:MockUser, [int]$LifetimeSec = 3600, [switch]$NoUpn, [string]$Scp = 'Application.ReadWrite.All AppRoleAssignment.ReadWrite.All DelegatedPermissionGrant.ReadWrite.All RoleManagement.ReadWrite.Directory User.ReadWrite.All User-PasswordProfile.ReadWrite.All Directory.Read.All Policy.Read.All Organization.Read.All') {
+    $b64 ={ param($o) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($o | ConvertTo-Json -Compress))).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
     $claims = @{ tid = $Tid; scp = $Scp; exp = [DateTimeOffset]::UtcNow.AddSeconds($LifetimeSec).ToUnixTimeSeconds(); jti = [guid]::NewGuid().ToString('N') }
     if ($NoUpn) { $claims['preferred_username'] = $Account } else { $claims['upn'] = $Account }
     (& $b64 @{ alg = 'none' }) + '.' + (& $b64 $claims) + '.sig-' + [guid]::NewGuid().ToString('N')
@@ -76,6 +76,7 @@ function global:Reset-MockState {
     $global:MockExoCtx = $null
     $global:MockHidden = [System.Collections.Generic.List[object]]::new()   # principaux de service de ressource "absents" (crees a la demande)
     $global:MockThrowOnDate = $false
+    $global:MockExoRetrieveReads = 0
     $global:MockGraphExpired = $false
     $global:MockGraphHeaders = [System.Collections.Generic.List[object]]::new()   # v2.4 : en-tetes ConsistencyLevel observes par appel Graph
     $global:MockOpts = @{
@@ -85,7 +86,9 @@ function global:Reset-MockState {
         ConnectFails      = $false
         Forbid            = @()           # @{ Method; Pattern } : 403 ciblé (regex sur le chemin)
         Throttle          = @()           # @{ Method; Pattern; Times } : 429 les N premieres fois puis succes
-        SecretReadLag     = 0             # v2.6 : le secret client ajoute n'apparait qu'apres N lectures de l'application (propagation)
+        KeyIdWith403      = $false        # v2.8.1 : les keyId de certificat generes contiennent la sous-chaine « 403 » (un keyId ne doit JAMAIS etre pris pour un code HTTP)
+    CertReadLag       = 0             # v2.8 : le nouveau certificat n'est plus lisible pendant N lectures de l'application APRES l'ecriture du connecteur (propagation Entra : nettoyage des certificats)
+    SecretReadLag     = 0             # v2.6 : le secret client ajoute n'apparait qu'apres N lectures de l'application (propagation)
         Replication404    = 0             # POST /servicePrincipals : 404 les N premieres fois (propagation Entra)
         ConditionalAccess = 'mfa-all'     # 'mfa-all' | 'none'
         ModuleMissing     = $false        # Microsoft.Graph.Authentication absent du poste
@@ -121,6 +124,13 @@ function global:Reset-MockState {
         EwsEnabled        = $true         # v2.2 : EwsEnabled de l'organisation ($true | $false | $null)
         EwsList           = @('0000aaaa-0000-0000-0000-000000000001')   # v2.2 : EwsAllowedAppIDs de l'organisation (une autre application deja inscrite par defaut ; @() pour tester la liste vide)
         ExoOnSet          = $null         # v2.2 : scriptblock { param($Hash) } appele avant chaque Set-OrganizationConfig
+        ExoNoRetrieveSwitch = $false      # v2.9 : le module installe ne connait pas -RetrieveEwsOperationAccessPolicy (parametre introuvable)
+        ExoRetrieveFailFrom = 0           # v2.9 : la Nieme lecture AVEC le commutateur (et les suivantes) echoue ; 0 = jamais
+        EwsListAsString   = $false        # v2.9 : EwsAllowedAppIDs renvoyee comme UNE chaine "a,b" (au lieu d'une collection)
+        ExoSetDrops       = $false        # v2.9 : Set-OrganizationConfig accepte sans erreur mais ne garde que la derniere entree (perte detectee a la relecture)
+        GrantedScopes     = $null         # v2.9 (M7) : portees deleguees REELLEMENT accordees a la session Graph interactive (defaut : celles demandees)
+        OperatorRoles     = $null         # v2.9 (M7) : roles Entra de l'operateur en plus de IsGA (noms : 'PAA' = Privileged Authentication Administrator)
+        CiwBlankSecrets   = $false        # v2.9 : les LECTURES du connecteur renvoient RestClientSecret et MigrationAccountPassword VIDES (mesure reelle du 2026-11-25) ; le certificat reste en clair
         OnWrite           = $null         # scriptblock { param($Method, $Path, $Body) } appele avant chaque ecriture Graph (verifie l'ORDRE des operations)
     }
     Reset-MockTenant
@@ -232,6 +242,18 @@ function global:Invoke-MgGraphRequest {
     if ($thr -and $thr.Times -gt 0) { $thr.Times--; Add-MockCall 'Graph' $Method $path '429' $isWrite $bodyTxt; throw (New-MockError 429 'TooManyRequests' 'Too many requests.') }
     if (Test-MockPattern $global:MockOpts.ForbidPolicy $Method $path) { Add-MockCall 'Graph' $Method $path '403' $isWrite $bodyTxt; throw (New-MockError 403 'Authorization_RequestDenied' 'The requested operation is not allowed as per assigned policy.') }
     if ($global:MockOpts.ForbidPasswordReset -and $Method -eq 'PATCH' -and $path -like '/users/*' -and $bodyTxt -match 'passwordProfile') { Add-MockCall 'Graph' $Method $path '403' $isWrite $bodyTxt; throw (New-MockError 403 'Authorization_RequestDenied' 'Insufficient privileges to complete the operation.') }
+    # v2.9 : la reinitialisation d'un mot de passe est REFUSEE comme par Graph (documentation user-update lue le 2026-11-25) :
+    #   - la session doit porter la portee deleguee User-PasswordProfile.ReadWrite.All (ou Directory.AccessAsUser.All) : User.ReadWrite.All ne suffit PAS ;
+    #   - si le compte vise detient un role d'administrateur, l'operateur doit etre Administrateur general ou Privileged Authentication Administrator.
+    # C'est ce que le faux tenant de la v2.8 ne modelisait pas (il acceptait toute ecriture) : la relance d'un tenant deja configure passait a tort.
+    if ($Method -eq 'PATCH' -and $bodyTxt -match 'passwordProfile' -and $path -match '^/users/([^/]+)$') {
+        $tgtId = $Matches[1]
+        $sc0 = @($global:MockMgCtx.Scopes | ForEach-Object { "$_" -split '\s+' } | Where-Object { $_ })
+        $hasPwdScope = (@($sc0 | Where-Object { $_ -ieq 'User-PasswordProfile.ReadWrite.All' -or $_ -ieq 'Directory.AccessAsUser.All' }).Count -gt 0)
+        $tgtIsAdmin = (@($T.RoleAssign | Where-Object { $_.principalId -eq $tgtId }).Count -gt 0)
+        $opCanAdmins = ([bool]$global:MockOpts.IsGA -or (@($global:MockOpts.OperatorRoles) -contains 'PAA'))
+        if (-not $hasPwdScope -or ($tgtIsAdmin -and -not $opCanAdmins)) { Add-MockCall 'Graph' $Method $path '403' $isWrite $bodyTxt; throw (New-MockError 403 'Authorization_RequestDenied' 'Insufficient privileges to complete the operation.') }
+    }
     if (Test-MockPattern $global:MockOpts.Forbid $Method $path) { Add-MockCall 'Graph' $Method $path '403' $isWrite $bodyTxt; throw (New-MockError 403 'Authorization_RequestDenied' 'Insufficient privileges to complete the operation.') }
     $gf = Test-MockPattern $global:MockOpts.GraphFail $Method $path
     if ($gf -and $gf.Query -and $q -notmatch $gf.Query) { $gf = $null }   # Query (regex facultative) : cible un GET precis par son $select
@@ -280,6 +302,10 @@ function global:Invoke-MgGraphRequest {
                 $id = $Matches[1]; $a = @($T.Apps | Where-Object { $_.id -eq $id })[0]
                 if (-not $a) { & $notFound "Resource '$id' does not exist or one of its queried reference-property objects are not present." }
                 & $ok
+                if ($T.KeyLagLeft -gt 0 -and $T.KeyLagId) {
+                    $T.KeyLagLeft--
+                    $c = Copy-Mock $a; $c.keyCredentials = @(@($c.keyCredentials) | Where-Object { "$($_.keyId)" -ne $T.KeyLagId }); return $c
+                }
                 if ($T.SecretLagLeft -gt 0 -and $T.SecretLagId) {
                     $T.SecretLagLeft--
                     $c = Copy-Mock $a; $c.passwordCredentials = @(@($c.passwordCredentials) | Where-Object { "$($_.keyId)" -ne $T.SecretLagId }); return $c
@@ -468,7 +494,7 @@ function global:Invoke-MgGraphRequest {
                             if ($kc.type -ne 'AsymmetricX509Cert' -or $kc.usage -ne 'Verify' -or -not $kc.key) { & $bad 'keyCredential invalide (type/usage/key).' }
                             try { $raw = [Convert]::FromBase64String($kc.key); $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($raw) } catch { & $bad "certificat illisible : $($_.Exception.Message)" }
                             $thumb = [Convert]::ToHexString([System.Security.Cryptography.SHA1]::HashData($raw)); $cert.Dispose()   # Graph reel : empreinte en hexadecimal (constate 2026-10-31)
-                            $nkid = [guid]::NewGuid().ToString(); $T.KeyPubs[$nkid] = "$($kc.key)"
+                            $nkid = [guid]::NewGuid().ToString(); if ($global:MockOpts.KeyIdWith403) { $nkid = $nkid.Substring(0, 9) + '403' + $nkid.Substring(12) }; $T.KeyPubs[$nkid] = "$($kc.key)"; $T.LastCertKeyId = $nkid
                             $new.Add(@{ keyId = $nkid; type = $kc.type; usage = $kc.usage; customKeyIdentifier = $thumb; displayName = $kc.displayName; startDateTime = $kc.startDateTime; endDateTime = $kc.endDateTime; key = $null })
                         }
                     }
@@ -521,8 +547,16 @@ function global:Connect-MgGraph {
         $cl = ConvertFrom-JwtPayload $tp; $tp = $null
         if ($cl) { $tid = "$($cl.tid)"; $acc = Get-JwtAccount $cl }
     }
+    # v2.9 (M7) : portees REELLES de la session : celles du jeton fourni (revendication scp), sinon celles demandees (ou MockOpts.GrantedScopes).
+    $effScopes = @($Scopes)
+    if ($AccessToken) {
+        $tp2 = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($AccessToken))
+        $cl2 = ConvertFrom-JwtPayload $tp2; $tp2 = $null
+        $effScopes = if ($cl2 -and $cl2.PSObject.Properties['scp']) { @("$($cl2.scp)" -split '\s+' | Where-Object { $_ }) } else { @() }
+    }
+    elseif ($null -ne $global:MockOpts.GrantedScopes) { $effScopes = @($global:MockOpts.GrantedScopes) }
     $global:MockGraphExpired = $false   # nouvelle connexion = nouveau jeton
-    $global:MockMgCtx = [pscustomobject]@{ TenantId = $tid; Account = $acc; Scopes = @($Scopes); ContextScope = $ContextScope }
+    $global:MockMgCtx = [pscustomobject]@{ TenantId = $tid; Account = $acc; Scopes = @($effScopes); ContextScope = $ContextScope }
 }
 function global:Get-MgContext { [CmdletBinding()] param() $global:MockMgCtx }
 function global:Disconnect-MgGraph { [CmdletBinding()] param() Add-MockCall 'Cmd' 'DISCONNECT' 'Disconnect-MgGraph'; $global:MockMgCtx = $null }
@@ -549,13 +583,29 @@ function global:Get-ConnectionInformation {
     elseif ($global:MockOpts.ExoPreSession) { [pscustomobject]@{ TenantID = $global:MockOpts.ExoPreSession.TenantID; UserPrincipalName = $global:MockOpts.ExoPreSession.UserPrincipalName; State = 'Connected' } }
 }
 function global:Disconnect-ExchangeOnline { [CmdletBinding(SupportsShouldProcess)] param() Add-MockCall 'Cmd' 'DISCONNECT-EXO' 'Disconnect-ExchangeOnline'; $global:MockExoCtx = $null }
+# v2.9 : le mock REPRODUIT LE PIEGE reel : sans -RetrieveEwsOperationAccessPolicy, EwsAllowedAppIDs sort VIDE meme quand la liste existe
+# (documentation Microsoft lue le 2026-11-25 ; constat terrain des 03 et 04/11/2026). Le mock de la v2.8 renvoyait la liste sans le commutateur, ce
+# qui masquait le defaut. Chemin journalise : 'Get-OrganizationConfig' (lecture simple) ou 'Get-OrganizationConfig -Retrieve' (avec le commutateur).
 function global:Get-OrganizationConfig {
     [CmdletBinding()]
-    param()
-    if ($null -eq $global:MockExoCtx -and -not $global:MockOpts.ExoPreSession) { Add-MockCall 'Exo' 'GET' 'Get-OrganizationConfig' 'NON-CONNECTE'; throw 'MOCK: pas de session Exchange Online.' }
-    if ($global:MockOpts.ExoReadFails) { Add-MockCall 'Exo' 'GET' 'Get-OrganizationConfig' 'ECHEC'; throw 'MOCK: Get-OrganizationConfig refuse (droits insuffisants).' }
-    Add-MockCall 'Exo' 'GET' 'Get-OrganizationConfig'
-    [pscustomobject]@{ EwsEnabled = $global:MockOpts.EwsEnabled; EwsAllowedAppIDs = @($global:MockOpts.EwsList); EwsApplicationAccessPolicy = $null; EwsAllowList = $null; EwsBlockList = $null }
+    param([switch]$RetrieveEwsOperationAccessPolicy)
+    $withSwitch = [bool]$RetrieveEwsOperationAccessPolicy
+    $pathTxt = if ($withSwitch) { 'Get-OrganizationConfig -Retrieve' } else { 'Get-OrganizationConfig' }
+    if ($null -eq $global:MockExoCtx -and -not $global:MockOpts.ExoPreSession) { Add-MockCall 'Exo' 'GET' $pathTxt 'NON-CONNECTE'; throw 'MOCK: pas de session Exchange Online.' }
+    if ($global:MockOpts.ExoReadFails) { Add-MockCall 'Exo' 'GET' $pathTxt 'ECHEC'; throw 'MOCK: Get-OrganizationConfig refuse (droits insuffisants).' }
+    if ($withSwitch) {
+        # Module trop ancien : le commutateur n'existe pas (meme message que PowerShell pour un parametre inconnu).
+        if ($global:MockOpts.ExoNoRetrieveSwitch) { Add-MockCall 'Exo' 'GET' $pathTxt 'PARAM-INCONNU'; throw "A parameter cannot be found that matches parameter name 'RetrieveEwsOperationAccessPolicy'." }
+        $global:MockExoRetrieveReads = 1 + [int]$global:MockExoRetrieveReads
+        # ExoRetrieveFailFrom = N : la Nieme lecture avec le commutateur (et les suivantes) echoue (ex. 2 = lecture du plan reussie, relecture avant ecriture en echec).
+        if ([int]$global:MockOpts.ExoRetrieveFailFrom -gt 0 -and $global:MockExoRetrieveReads -ge [int]$global:MockOpts.ExoRetrieveFailFrom) { Add-MockCall 'Exo' 'GET' $pathTxt 'ECHEC'; throw 'MOCK: lecture avec -RetrieveEwsOperationAccessPolicy refusee.' }
+        Add-MockCall 'Exo' 'GET' $pathTxt
+        # EwsListAsString : forme « chaine unique de GUID separes par des virgules » (la forme reelle n'est pas documentee : les deux sont testees).
+        $val = if ($global:MockOpts.EwsListAsString) { (@($global:MockOpts.EwsList) -join ',') } else { @($global:MockOpts.EwsList) }
+        return [pscustomobject]@{ EwsEnabled = $global:MockOpts.EwsEnabled; EwsAllowedAppIDs = $val; EwsApplicationAccessPolicy = $null; EwsAllowList = $null; EwsBlockList = $null }
+    }
+    Add-MockCall 'Exo' 'GET' $pathTxt
+    [pscustomobject]@{ EwsEnabled = $global:MockOpts.EwsEnabled; EwsAllowedAppIDs = $null; EwsApplicationAccessPolicy = $null; EwsAllowList = $null; EwsBlockList = $null }
 }
 function global:Set-OrganizationConfig {
     [CmdletBinding(SupportsShouldProcess)]
@@ -572,6 +622,8 @@ function global:Set-OrganizationConfig {
     if ($global:MockOpts.ExoOnSet) { & $global:MockOpts.ExoOnSet $EwsAllowedAppIDs }
     if ($global:MockOpts.ExoSetFails) { throw 'MOCK: Set-OrganizationConfig refuse (droits insuffisants).' }
     if ($new.Count -eq 0 -or $notGuid.Count -gt 0) { throw "||Invalid value provided for parameter EwsAllowedAppIDs '$EwsAllowedAppIDs'. Please provide comma separated values of valid GUIDs." }
+    # v2.9 : ExoSetDrops : l'ecriture est acceptee SANS erreur mais seule la DERNIERE entree est conservee (perte d'entrees : la relecture doit la voir).
+    if ($global:MockOpts.ExoSetDrops) { $global:MockOpts.EwsList = @($new | Select-Object -Last 1); return }
     $global:MockOpts.EwsList = $new
 }
 
@@ -628,7 +680,9 @@ function global:Invoke-RestMethod {
         $gt = if ($global:MockOpts.ConnectTenantId) { $global:MockOpts.ConnectTenantId } else { $tid }
         $ga = if ($global:MockOpts.ConnectAccount) { $global:MockOpts.ConnectAccount } else { $global:MockUser }
         $b64 = { param($o) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($o | ConvertTo-Json -Compress))).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
-        $claims = @{ tid = $gt; scp = 'Application.ReadWrite.All'; exp = [DateTimeOffset]::UtcNow.AddSeconds([int]$global:MockOpts.DeviceTokenLifetimeSec).ToUnixTimeSeconds() }
+        # v2.9 (M7) : le jeton du code d'appareil porte les portees demandees par l'outil (MockOpts.DeviceScp pour simuler un jeton plus pauvre).
+        $dscp = if ($global:MockOpts.DeviceScp) { "$($global:MockOpts.DeviceScp)" } else { 'Application.ReadWrite.All AppRoleAssignment.ReadWrite.All DelegatedPermissionGrant.ReadWrite.All RoleManagement.ReadWrite.Directory User.ReadWrite.All User-PasswordProfile.ReadWrite.All Directory.Read.All Policy.Read.All Organization.Read.All' }
+        $claims = @{ tid = $gt; scp = $dscp; exp =[DateTimeOffset]::UtcNow.AddSeconds([int]$global:MockOpts.DeviceTokenLifetimeSec).ToUnixTimeSeconds() }
         if ($global:MockOpts.DeviceNoUpn) { $claims['preferred_username'] = $ga } else { $claims['upn'] = $ga }   # invite B2B : pas d'upn
         $jwt = (& $b64 @{ alg = 'none' }) + '.' + (& $b64 $claims) + '.sig'
         return ([pscustomobject]@{ access_token = $jwt; token_type = 'Bearer'; expires_in = 3600 })
@@ -688,6 +742,11 @@ function global:Invoke-RestMethod {
                 try { $s = $c.rawSettings | ConvertFrom-Json -AsHashtable; foreach ($k in @($s.Keys)) { if ("$k" -match 'Password|Secret') { $s[$k] = '********' } }; $c.rawSettings = ($s | ConvertTo-Json -Compress) } catch { }
             }
         }
+        # v2.9 : forme MESUREE en reel le 2026-11-25 (exploration de l'API) : RestClientSecret et MigrationAccountPassword reviennent VIDES,
+        # alors que connectorCertificate.secret et certificateFile reviennent EN CLAIR.
+        if ($global:MockOpts.CiwBlankSecrets -and $c.rawSettings) {
+            try { $s = $c.rawSettings | ConvertFrom-Json -AsHashtable; foreach ($k in @($s.Keys)) { if ("$k" -match '^(RestClientSecret|MigrationAccountPassword)$') { $s[$k] = '' } }; $c.rawSettings = ($s | ConvertTo-Json -Compress) } catch { }
+        }
         $c
     }
     switch -Regex ($path) {
@@ -700,6 +759,7 @@ function global:Invoke-RestMethod {
                 if (@($mine | Where-Object { $_.name -eq $b.name }).Count -gt 0) { & $fail 400 "Un connecteur nomme '$($b.name)' existe deja." }
                 if ("$($b.externalKey)".Length -gt 50) { & $fail 500 "Posting connector failed : String or binary data would be truncated in table 'Project_Connectors', column 'ExternalKey'." }
                 $CW.PostCount++
+                if ([int]$global:MockOpts.CertReadLag -gt 0 -and $global:MockTenant.LastCertKeyId) { $global:MockTenant.KeyLagId = $global:MockTenant.LastCertKeyId; $global:MockTenant.KeyLagLeft = [int]$global:MockOpts.CertReadLag }
                 $cfp = "$($b.connectorCertificate.certificateFile)"; if ($cfp -match '\.pfx$') { $CW.CertFileSeen = (Test-Path -LiteralPath $cfp); $CW.CertFilePath = $cfp }   # transport Path : le fichier doit exister au moment de l'appel
                 $newId = $CW.NextId++
                 # Le portail re-serialise rawsettings : toute cle INCONNUE est supprimee (fait mesure 3)
@@ -731,6 +791,7 @@ function global:Invoke-RestMethod {
                 # Fait mesure 4 : un PUT SANS connectorCertificate sur un connecteur qui en possede un echoue (HTTP 500) ; le connecteur reste inchange.
                 if ($c.connectorCertificate -and -not $sentCert -and -not $global:MockOpts.CiwPutWipes) { & $fail 500 'Object reference not set to an instance of an object.' }
                 $CW.PutCount++
+                if ([int]$global:MockOpts.CertReadLag -gt 0 -and $global:MockTenant.LastCertKeyId) { $global:MockTenant.KeyLagId = $global:MockTenant.LastCertKeyId; $global:MockTenant.KeyLagLeft = [int]$global:MockOpts.CertReadLag }
                 $cfp = "$($b.connectorCertificate.certificateFile)"; if ($cfp -match '\.pfx$') { $CW.CertFileSeen = (Test-Path -LiteralPath $cfp); $CW.CertFilePath = $cfp }
                 $old0 = $null; try { $old0 = $c.rawSettings | ConvertFrom-Json -AsHashtable } catch { }
                 $c.name = $b.name; $c.isTarget = [bool]$b.isTarget; $c.rawProductList = $b.rawProductList

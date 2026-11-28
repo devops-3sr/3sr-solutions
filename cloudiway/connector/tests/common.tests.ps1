@@ -131,10 +131,14 @@ Describe 'Mode Cible, SharePoint et compte de service' {
         $n.ServiceAccountLocal | Should -Be 'svc-ciw-target-p12345'
         $n.CertificateSubject | Should -Be 'CN=Cloudiway-TARGET-P12345'
     }
-    It 'produits : l''identifiant de SharePoint est inconnu (la ligne Cloudiway est bloquee tant qu''il n''est pas fourni)' {
-        $p = Get-ProductIds -Workloads 'Mail', 'SharePoint'
-        ($p.Ids -join ',') | Should -Be '5'
-        $p.Unknown | Should -Contain 'SharePoint'
+    It 'produits par defaut (v2.8) : Mail = 5, OneDrive = 6, SharePoint = 7 (confirme), Teams = 8 (provisoire)' {
+        $p = Get-ProductIds -Workloads 'Mail', 'OneDrive', 'SharePoint', 'Teams'
+        ($p.Ids -join ',') | Should -Be '5,6,7,8'
+        $p.Unknown.Count | Should -Be 0
+    }
+    It 'produits : Archive reste inconnu (arret rapide)' {
+        $p = Get-ProductIds -Workloads 'Mail', 'Archive'
+        $p.Unknown | Should -Contain 'Archive'
     }
     It 'produits : -Override fournit l''identifiant de SharePoint' {
         $p = Get-ProductIds -Workloads 'Mail', 'OneDrive', 'SharePoint' -Override 5, 6, 9
