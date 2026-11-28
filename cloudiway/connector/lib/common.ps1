@@ -17,6 +17,29 @@ function New-SecureStringFromText([string]$Text) {
     return $s
 }
 
+# v2.9 (m15) : un dossier de sortie deja present n'est JAMAIS reutilise (deux lancements dans la meme seconde) : suffixe -02, -03...
+function Get-FreeRunPath([string]$Path) {
+    $candidate = $Path; $n = 1
+    while (Test-Path -LiteralPath $candidate) {
+        $n++
+        if ($n -gt 99) { throw "Aucun nom de dossier de sortie libre pour '$Path'." }
+        $candidate = '{0}-{1:00}' -f $Path, $n
+    }
+    return $candidate
+}
+
+# Cree un dossier de sortie NEUF et retourne son chemin. La reservation est ATOMIQUE : le dossier n'est acquis que par celui qui cree
+# son run.log (FileMode.CreateNew) ; un lancement simultane qui perd la course passe au nom suivant.
+function New-RunFolder([string]$Path) {
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    for ($try = 1; ; $try++) {
+        $candidate = Get-FreeRunPath $full
+        [System.IO.Directory]::CreateDirectory($candidate) | Out-Null
+        $claim = Join-Path $candidate 'run.log'
+        try { [System.IO.File]::Open($claim, [System.IO.FileMode]::CreateNew).Dispose(); return $candidate }
+        catch { if ($try -ge 50 -or -not (Test-Path -LiteralPath $claim)) { throw } }
+    }
+}
 function Write-RunLog([string]$Msg) {
     # Ecrit dans run.log (jamais de secret : l'appelant ne doit pas passer de valeur sensible).
     try {

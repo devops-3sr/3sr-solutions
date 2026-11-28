@@ -32,7 +32,7 @@
 
 ## Minor changes
 
-Cleanup note shown in the report; `-Region` restricted to 1-99; portal token no longer guessed from an arbitrary cookie; output folder stamped to the second.
+Cleanup note shown in the report; `-Region` restricted to 1-99; portal token no longer guessed from an arbitrary cookie; output folder stamped to the second, and an existing folder is never reused (runs started in the same second get a `-02`, `-03` suffix).
 
 ## Behaviour changes for the operator
 

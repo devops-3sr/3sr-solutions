@@ -2870,7 +2870,22 @@ $rM1a = Invoke-Connector $pM1 $baseM1
 $rM1b = Invoke-Connector $pM1 $baseM1
 $mdM1b = Read-RunFile $rM1b 'Rapport-*.md'
 T 38 'm1 : la note « N ancien(s) certificat(s) retire(s) » apparait dans la colonne Detail du rapport (elle etait perdue en v2.8)' ($rM1b.Exit -eq 0 -and $mdM1b -match '1 ancien\(s\) certificat\(s\) retire\(s\) : certificat keyId=') "exit=$($rM1b.Exit)"
+$m15p = Join-Path (New-Base 'M38c') 'contoso-Source-20260101-000000'
+$libM15 = Join-Path $pkg 'lib\common.ps1'
+$m15r = @(1..12 | ForEach-Object -ThrottleLimit 12 -Parallel { . $using:libM15; New-RunFolder $using:m15p })
+T 38 'm15 : douze creations simultanees du meme nom : douze dossiers distincts' (@($m15r | Sort-Object -Unique).Count -eq 12) "distincts=$(@($m15r | Sort-Object -Unique).Count)"
 T 38 'm15 : dossier de sortie horodate a la seconde : deux lancements successifs ont chacun leur dossier (journal et rapport non partages)' ($rM1a.Dir -and $rM1b.Dir -and $rM1a.Dir.FullName -ne $rM1b.Dir.FullName -and $rM1b.Dir.Name -match '-\d{8}-\d{6}(-\d\d)?$') "a=$($rM1a.Dir.Name) b=$($rM1b.Dir.Name)"
+# m15 : deterministe, sans dependre de l'horloge : un dossier deja present (autre lancement dans la meme seconde) n'est jamais reutilise
+# Espace d'execution SEPARE : charger lib\common.ps1 dans le banc reinitialiserait $script:Results (la liste des resultats du banc)
+$m15Base = New-Base 'M38b'
+$m15 = @(1 | ForEach-Object -Parallel {
+    . (Join-Path $using:pkg 'lib\common.ps1')
+    $want = Join-Path $using:m15Base 'contoso-Source-20260101-000000'
+    $a = New-RunFolder $want; Set-Content -LiteralPath (Join-Path $a 'run.log') -Value 'premier'
+    $b = New-RunFolder $want; $c3 = New-RunFolder $want
+    [pscustomobject]@{ A = $a; B = $b; C = $c3; Want = $want; Kept = ((Get-Content -LiteralPath (Join-Path $a 'run.log') -Raw).Trim() -eq 'premier'); BEmpty = ((@(Get-ChildItem -LiteralPath $b).Name -join ',') -eq 'run.log' -and (Get-Item -LiteralPath (Join-Path $b 'run.log')).Length -eq 0) }
+})[0]
+T 38 'm15 : meme nom demande trois fois : trois dossiers distincts (-02, -03), le contenu du premier est intact' ($m15.A -eq $m15.Want -and $m15.B -eq ($m15.Want + '-02') -and $m15.C -eq ($m15.Want + '-03') -and $m15.Kept -and $m15.BEmpty) "a=$($m15.A) b=$($m15.B) c=$($m15.C)"
 $pM3 = $pM1.Clone(); $pM3['Region'] = 0; $pM3['WhatIf'] = $true; $pM3.Remove('Yes')
 $rM3 = Invoke-Connector $pM3 $baseM1
 T 38 'm3 : -Region 0 est REFUSE (il etait accepte puis remplace en silence par 1)' (($rM3.Crash + $rM3.Console) -match 'Region' -and $rM3.GraphWrites -eq 0 -and $rM3.Connects -eq 0) "exit=$($rM3.Exit) crash=$($rM3.Crash)"
@@ -2981,11 +2996,15 @@ $labels = [ordered]@{
 # v2.9 : garde-fou du banc : un test range sous un point SANS libelle ne serait pas compte dans les echecs (code de sortie faux).
 $unlabeled = @($Results | Where-Object { "$($_.Point)" -notin @($labels.Keys) } | ForEach-Object { "$($_.Point)" } | Sort-Object -Unique)
 if ($unlabeled.Count -gt 0) { $Results.Add([pscustomobject]@{ Point = '24'; Test = 'banc : tous les points utilises ont un libelle (sinon leurs echecs ne sont pas comptes)'; Result = 'FAIL'; Detail = ($unlabeled -join ', ') }) }
+$benchSource = [System.IO.File]::ReadAllText($PSCommandPath)
 $fails = 0
 foreach ($k in $labels.Keys) {
     $rs = @($Results | Where-Object { "$($_.Point)" -eq $k })
     $nf = @($rs | Where-Object Result -EQ 'FAIL').Count; $ns = @($rs | Where-Object Result -EQ 'SKIP').Count; $np = @($rs | Where-Object Result -EQ 'PASS').Count
     $fails += $nf
+    # un point qui a des assertions dans ce fichier mais aucun resultat est un echec (resultats perdus ou section non executee) ;
+    # un point sans assertion (retire du paquet public) reste N/A
+    if ($rs.Count -eq 0 -and $benchSource -match ("(?m)^\s*T\s+'?" + [regex]::Escape($k) + "'?\s")) { $fails++ }
     $verdict = if ($rs.Count -eq 0) { 'N/A ' } elseif ($nf -gt 0) { 'FAIL' } elseif ($ns -gt 0 -and $np -eq 0) { 'SKIP' } else { 'PASS' }
     $col = switch ($verdict) { 'FAIL' { 'Red' } 'SKIP' { 'Yellow' } default { 'Green' } }
     Say ("[{0}] {1,-3} {2,-52} {3} pass / {4} fail / {5} skip" -f $verdict, $k, $labels[$k], $np, $nf, $ns) $col

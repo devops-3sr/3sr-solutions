@@ -982,7 +982,7 @@ $script:Ctx = @{
     RotateCredentials    = (-not [bool]$KeepCredentials)   # v2.3 : renouvellement a chaque execution par defaut ; -KeepCredentials = ancien comportement idempotent
     KeepCredentials      = [bool]$KeepCredentials
     AdoptExisting        = [bool]$AdoptExisting
-    Out                  = $Out
+    Out                  = $null                # v2.9 (m15) : renseigne a la creation du dossier (jamais le dossier d'un autre lancement)
     OutBase              = $OutBase
     WhatIf               = $simulate
     AllowEwsListCreation = [bool]$AllowEwsListCreation   # v2.2 : liste EwsAllowedAppIDs vide -> creation autorisee sans question
@@ -1151,7 +1151,8 @@ if (-not $Discover) {
         $fsMsg = 'Session Exchange Online d''un AUTRE tenant ouverte dans cette console : arret. Fermez cette console, ouvrez-en une NOUVELLE pour ce tenant puis relancez la meme commande (une console PowerShell par tenant).'
         Write-Status FAIL $fsMsg ('Session trouvee : ' + [string]$script:Exo.Session.Detail + '. Aucune connexion et aucune ecriture n''ont ete faites. (Usage avance consultant : -AllowForeignSession.)')
         try {
-            New-Item -ItemType Directory -Force -Path $Out | Out-Null
+            $Out = New-RunFolder $Out
+            $script:Ctx.Out = $Out
             Write-RunLog ('ARRET prerequis : ' + $fsMsg + ' Session trouvee : ' + [string]$script:Exo.Session.Detail)
             $fsRep = "# Rapport - arret avant toute action - $ProvShort ($Mode)`r`n`r`n- Outil : $($script:AppName) version $ScriptVersion ($($script:AppDate))`r`n- Date : $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n`r`n## Resultat`r`n`r`nARRET a l'etape des prerequis, code de sortie 1. Aucune connexion Graph, aucune ecriture dans le tenant, Exchange ou Cloudiway.`r`n`r`n## A faire`r`n`r`n1. **$fsMsg** Session trouvee : $([string]$script:Exo.Session.Detail).`r`n"
             Set-Content -LiteralPath (Join-Path $Out ("Rapport-{0}-{1}.md" -f $ProvShort, $Mode)) -Value $fsRep -Encoding utf8BOM
@@ -1165,7 +1166,7 @@ if (-not $Discover) {
             '-AllowForeignSession : la configuration du tenant se poursuit mais l''etape Exchange (EWS) sera IGNOREE (a faire a la main) et le code de sortie sera 2.')
     }
 }
-try { New-Item -ItemType Directory -Force -Path $Out | Out-Null } catch { Write-Status FAIL "Impossible de creer '$Out'" $_.Exception.Message; Stop-Run 1 }
+try { $Out = New-RunFolder $Out; $script:Ctx.Out = $Out } catch { Write-Status FAIL "Impossible de creer '$Out'" $_.Exception.Message; Stop-Run 1 }
 Write-RunLog ("Debut v{0}. Mode={1} Discover={2} Simulation={3} Workloads={4} SkipCloudiway={5} AuthMethod={6} ValidityDays={7} Keep={8}" -f $ScriptVersion, $Mode, [bool]$Discover, $simulate, (@($Workloads) -join ','), [bool]$SkipCloudiway, $AuthMethod, $ValidityDays, [bool]$KeepCredentials)
 if ($OutFallback) { Write-RunLog ("Dossier de sortie replie sur un dossier local : {0}" -f $OutBase) }
 if ($OutRisk) { Write-RunLog ("AVERTISSEMENT dossier de sortie a risque : {0}" -f $OutRisk) }
@@ -1435,9 +1436,9 @@ try {
 
 # Le dossier de sortie prend le vrai nom court du tenant
 $finalOut = Join-Path $OutBase ("{0}-{1}-{2}" -f $short, $Mode, $Stamp)
-if ($finalOut -ne $Out) {
+if ($short -ne $ProvShort) {
     try {
-        if (Test-Path -LiteralPath $finalOut) { $finalOut = $finalOut + '-' + (Get-Date -Format 'ss') }
+        $finalOut = Get-FreeRunPath $finalOut
         Rename-Item -LiteralPath $Out -NewName (Split-Path -Leaf $finalOut) -ErrorAction Stop
         $Out = $finalOut
         $script:Ctx.Out = $Out
