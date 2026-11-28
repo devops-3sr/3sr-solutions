@@ -1,33 +1,21 @@
 # cloudiway-connector : guide d'utilisation
 
-> [!CAUTION]
-> **Défauts connus de la version 2.7 et des précédentes (25/11/2026). Ne la lancez pas sur un tenant de production avant la publication d'une version corrigée.**
->
-> 1. **La liste EWS peut être écrasée.** Le script lit `EwsAllowedAppIDs` sans le commutateur `-RetrieveEwsOperationAccessPolicy` de `Get-OrganizationConfig` : une liste existante peut donc apparaître **vide**. Si vous confirmez alors la « création » de la liste (ou utilisez `-AllowEwsListCreation`), l'écriture **remplace la liste existante par une seule application** et peut couper toutes les autres applications EWS du tenant.
-> 2. **N'utilisez pas les commandes qui lisent la liste sans ce commutateur**, qu'elles soient affichées par le script (« A faire », « A verifier ») ou écrites aux sections [10](#10-la-liste-ews-dexchange-online) et [12](#12-retirer-les-objets-en-fin-de-projet) de ce guide : elles ont le même défaut.
-> 3. **Relancer le script sur un tenant déjà configuré** peut échouer en HTTP 403 (la portée `User-PasswordProfile.ReadWrite.All` n'est pas demandée), et chaque essai peut ajouter un certificat et un secret client à l'application.
->
-> **Vérifiez l'état réel (lecture seule)** après `Connect-ExchangeOnline`. Si le commutateur n'est pas reconnu, ne concluez pas que la liste est vide.
->
-> ```powershell
-> Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy | Format-List EwsAllowedAppIDs
-> Get-OrganizationConfig | Format-List EwsEnabled
-> ```
->
-> **Ne modifiez rien avant d'avoir lu la liste.** Si la version 2.7 ou une précédente a déjà été lancée sur votre tenant et que la liste ne contient que l'application Cloudiway alors que `EwsEnabled` vaut `True`, vérifiez avec le responsable du tenant qu'aucune autre application EWS n'a perdu son accès, et prévenez votre contact 3SR habituel.
-
 English version: [cloudiway-connector-guide-en.md](cloudiway-connector-guide-en.md)
+
+**N'utilisez pas les versions antérieures à la 2.9.** Remplacez-les par la 2.9. Elles lisaient la liste EWS d'Exchange Online sans le commutateur nécessaire et pouvaient, avec la confirmation ou `-AllowEwsListCreation`, remplacer une liste existante par la seule application de l'outil (voir [section 10](#10-la-liste-ews-dexchange-online), « Tenants déjà traités par une version antérieure »). **La 2.9 elle-même n'a encore jamais été exécutée sur un tenant réel** (voir [section 17](#17-ce-qui-est-validé-en-réel-et-ce-qui-ne-lest-pas)).
 
 `cloudiway-connector` est un script PowerShell qui **configure un tenant Microsoft 365** (« source » ou « cible ») pour un connecteur Cloudiway, puis **crée ou met à jour ce connecteur** dans votre projet Cloudiway. Il remplace la suite d'opérations manuelles décrites dans la documentation Cloudiway (inscription d'application, permissions, consentement, rôles Exchange, certificat, liste EWS, compte de service, saisie du connecteur dans le portail).
 
-Cette version (2.7) couvre :
+Cette version (2.9) couvre :
 
 - le **mode Source** (le tenant que l'on migre) et le **mode Cible** (le tenant de destination) ;
-- les charges de travail **Mail**, **OneDrive** et **SharePoint**.
+- les charges de travail **Mail**, **OneDrive**, **SharePoint** et **Teams**.
 
-Les autres charges de travail (Teams, Archive, GalSync, Intune, FreeBusy, Signature, MailRouting) ne sont pas disponibles dans cette version : le script les refuse (« non disponible dans cette version »), avant toute connexion.
+Les autres charges de travail (Archive, GalSync, Intune, FreeBusy, Signature, MailRouting) ne sont pas disponibles dans cette version : le script les refuse (« non disponible dans cette version »), avant toute connexion.
 
-**SharePoint : l'identifiant du produit Cloudiway est inconnu.** Tant qu'il n'est pas fourni (`-ProductIds` ou fichier `productmap.json`, voir [section 6](#6-la-charge-sharepoint-et-lidentifiant-de-produit-cloudiway)), le script **s'arrête au plus tôt** (code 1), **avant toute connexion et toute écriture** : rien n'est créé, ni dans le tenant, ni dans Cloudiway. Cela vaut aussi pour `-Workloads All`.
+**SharePoint et Teams sont ouverts, mais aucune migration SharePoint ou Teams n'a été validée en réel à ce jour.** Les identifiants de produit Cloudiway sont intégrés par défaut : SharePoint = 7 (confirmé en réel : la case « Site » est cochée dans le portail), Teams = 8 (**provisoire** : accepté par l'API, à confirmer par comparaison avec un connecteur créé par l'interface). Voir [section 6](#6-les-charges-sharepoint-et-teams-et-les-identifiants-de-produit-cloudiway).
+
+**À présenter au DSI avant de confirmer : SharePoint et Teams ajoutent des permissions d'application avec consentement administrateur, notamment en ÉCRITURE sur la cible** (`Group.ReadWrite.All`, `User.ReadWrite.All`, `Application.ReadWrite.All`, `Teamwork.Migrate.All`, `Chat.ReadWrite.All`, `Tasks.ReadWrite.All`, `TermStore.ReadWrite.All` côté SharePoint). **Ne demandez que les charges nécessaires.** Teams demande en plus une licence incluant Teams sur le compte de service et son exclusion de l'accès conditionnel MFA (voir [section 7](#7-le-compte-de-service)).
 
 **UNE CONSOLE POWERSHELL PAR TENANT.** Si vous traitez plusieurs tenants, ouvrez une **nouvelle** console PowerShell pour chacun. Depuis la version 2.7, une session Exchange Online d'un autre tenant ouverte dans la console **arrête le script** (code 1) avant toute connexion et toute écriture (voir [section 5.8](#58-une-console-powershell-par-tenant)).
 
@@ -46,7 +34,7 @@ Les autres charges de travail (Teams, Archive, GalSync, Intune, FreeBusy, Signat
 | 5 | Microsoft Entra | Les rôles d'annuaire **Exchange Administrator** et **Exchange Recipient Administrator**, attribués **au principal de service de l'application** (charge Mail seulement). |
 | 6 | Microsoft Entra | Un **certificat** (RSA 2048, SHA-256, sujet `CN=Cloudiway-SOURCE-P<projet>` ou `CN=Cloudiway-TARGET-P<projet>`) **et un secret client** (méthode `-AuthMethod Both`, par défaut : Cloudiway exige les deux), générés en mémoire ; la partie publique du certificat et le secret sont ajoutés à l'application. |
 | 7 | Microsoft Entra | Un **compte de service** (utilisateur, compte administrateur du connecteur) dans les cas décrits à la [section 7](#7-le-compte-de-service) : **Mail (Source ET Cible, donc aussi dans le tenant Source)**, **OneDrive en mode Cible**, **SharePoint**. Ce compte reçoit le rôle d'annuaire **SharePoint Administrator**, et l'application est configurée pour accepter les flux de client public. Il n'est **jamais supprimé par l'outil** : le DSI le supprime en fin de projet. |
-| 8 | Exchange Online | L'**AppID de l'application est ajouté à `EwsAllowedAppIDs`** (charge Mail seulement ; ajout seul, avec confirmation et avertissement si la liste est vide, voir [section 10](#10-la-liste-ews-dexchange-online)). |
+| 8 | Exchange Online | L'**AppID de l'application est ajouté à `EwsAllowedAppIDs`** (charge Mail seulement ; le paramètre remplace toute la liste, l'outil réécrit donc la liste lue plus l'AppID ; confirmation et avertissement si la liste est vide, voir [section 10](#10-la-liste-ews-dexchange-online)). |
 | 9 | Cloudiway | Un **connecteur** `<préfixe du domaine .onmicrosoft.com>-source` ou `-target` créé ou mis à jour dans votre projet (certificat, mot de passe du certificat, secret client, identifiant de l'application, domaine, région, produits Cloudiway, et, avec un compte de service, son identifiant et son mot de passe). |
 | 10 | Votre poste | Un dossier de résultats (`run.log` et `Rapport-...md`, sans secret) ; les modules PowerShell manquants si vous utilisez `-InstallMissingModules` ; le consentement de l'application Microsoft « Microsoft Graph Command Line Tools » (voir [section 5](#5-exécution-pas-à-pas)). |
 
@@ -59,6 +47,7 @@ Les autres charges de travail (Teams, Archive, GalSync, Intune, FreeBusy, Signat
 | Mail | `MailboxSettings.ReadWrite` | `Exchange.ManageAsApp`, `full_access_as_app` | (aucune) |
 | OneDrive | `User.Read.All`, `Files.ReadWrite.All`, `Sites.FullControl.All`, `Directory.Read.All` | (aucune) | `Sites.FullControl.All`, `User.Read.All` |
 | SharePoint | `Sites.FullControl.All`, `User.Read.All`, `Group.Read.All`, `Directory.Read.All` | (aucune) | `Sites.FullControl.All`, `User.Read.All` |
+| Teams | `Group.Read.All`, `ChannelMessage.Read.All`, `ChannelMember.ReadWrite.All`, `Chat.Read.All`, `Tasks.Read.All`, `Files.ReadWrite.All`, `Sites.FullControl.All`, `Directory.Read.All`, `User.Read.All` | (aucune) | (aucune) |
 
 *Mode Cible*
 
@@ -67,11 +56,13 @@ Les autres charges de travail (Teams, Archive, GalSync, Intune, FreeBusy, Signat
 | Mail | `MailboxSettings.ReadWrite` | `full_access_as_app`, `Exchange.ManageAsApp` | (aucune) |
 | OneDrive | `User.Read.All`, `Files.ReadWrite.All`, `Sites.FullControl.All`, `InformationProtectionPolicy.Read.All`, `Group.ReadWrite.All`, `Directory.Read.All` | `Exchange.ManageAsApp` | `Sites.FullControl.All`, `User.ReadWrite.All` |
 | SharePoint | `Sites.FullControl.All`, `User.ReadWrite.All`, `Group.ReadWrite.All`, `Application.ReadWrite.All`, `Directory.Read.All` | (aucune) | `Sites.FullControl.All`, `User.ReadWrite.All`, `TermStore.ReadWrite.All` |
+| Teams | `Group.ReadWrite.All`, `Application.ReadWrite.All`, `Teamwork.Migrate.All`, `ChannelMember.ReadWrite.All`, `Chat.ReadWrite.All`, `Tasks.ReadWrite.All`, `Sites.FullControl.All`, `Directory.Read.All`, `User.Read.All` | (aucune) | (aucune) |
 
-Ces permissions sont **larges** (accès aux boîtes aux lettres, aux fichiers et aux sites de tous les utilisateurs, avec écriture en Cible) : ce sont celles que demande Cloudiway pour migrer. Elles sont portées par l'application, pas par un compte nominatif ; c'est pourquoi la fin du projet doit comprendre leur retrait ([section 12](#12-retirer-les-objets-en-fin-de-projet)).
+Ces permissions sont **larges** (accès aux boîtes aux lettres, aux fichiers, aux sites et aux équipes de tous les utilisateurs, avec écriture en Cible ; les charges SharePoint et Teams ajoutent des permissions d'écriture sur la cible, à présenter au DSI avant de confirmer) : ce sont celles que demande Cloudiway pour migrer. Elles sont portées par l'application, pas par un compte nominatif ; c'est pourquoi la fin du projet doit comprendre leur retrait ([section 12](#12-retirer-les-objets-en-fin-de-projet)).
 
 **Ce que le script ne fait pas**
 
+- Il ne retombe sur le repli `PATCH` (qui ne garde que le nouveau certificat) que si Microsoft **refuse** réellement le retrait par `removeKey` : décision prise sur le code HTTP `403` ou sur le texte `Authorization_RequestDenied` / `Insufficient privileges`, jamais sur une autre erreur.
 - Il **ne supprime rien** dans le tenant ni dans Cloudiway, à **une seule exception** : les **anciens certificats et anciens secrets clients créés par l'outil lui-même** (nom commençant par `Cloudiway-SOURCE-P<projet>` ou `Cloudiway-TARGET-P<projet>`) sont retirés de l'application, après l'écriture réussie et vérifiée du nouveau certificat et du nouveau secret dans le connecteur (certificats : preuve de possession ou repli `PATCH` ; secrets : `removePassword`, avec relecture et attente de propagation Entra). Toute autre clé de l'application (posée à la main) est conservée. Le compte de service n'est jamais supprimé par l'outil (le DSI le supprime en fin de projet, [section 12](#12-retirer-les-objets-en-fin-de-projet)).
 - Il **n'écrit, n'affiche et ne journalise aucun secret** : le certificat, son mot de passe, le secret client et le mot de passe du compte de service sont générés en mémoire, envoyés directement à Cloudiway, puis effacés. Aucun fichier `.pfx`, aucun mot de passe, aucun état n'est écrit sur le disque.
 - Il **ne lit aucun contenu de messagerie** ni de fichier. Il lit de la configuration : organisation, applications, principaux de service, utilisateurs et rôles, octrois de permissions, configuration EWS d'Exchange Online, liste des projets et connecteurs Cloudiway.
@@ -87,7 +78,7 @@ Ces permissions sont **larges** (accès aux boîtes aux lettres, aux fichiers et
 3. [Prérequis](#3-prérequis)
 4. [Étape préalable : l'invitation au projet Cloudiway](#4-étape-préalable--linvitation-au-projet-cloudiway)
 5. [Exécution pas à pas](#5-exécution-pas-à-pas)
-6. [La charge SharePoint et l'identifiant de produit Cloudiway](#6-la-charge-sharepoint-et-lidentifiant-de-produit-cloudiway)
+6. [Les charges SharePoint et Teams et les identifiants de produit Cloudiway](#6-les-charges-sharepoint-et-teams-et-les-identifiants-de-produit-cloudiway)
 7. [Le compte de service](#7-le-compte-de-service)
 8. [Objets créés et noms codifiés](#8-objets-créés-et-noms-codifiés)
 9. [Renouvellement : chaque exécution renouvelle le certificat et le secret](#9-renouvellement--chaque-exécution-renouvelle-le-certificat-et-le-secret)
@@ -107,7 +98,7 @@ Ces permissions sont **larges** (accès aux boîtes aux lettres, aux fichiers et
 2. **Se connecte au portail Cloudiway** avec **votre** compte (mot de passe saisi masqué, ou jeton PAT), détecte le projet et lit le connecteur existant. Cette étape se fait **avant** toute écriture dans le tenant : si Cloudiway est inaccessible, rien n'est modifié.
 3. **Se connecte au tenant** (fenêtre de connexion Microsoft, ou code d'appareil) avec le compte `-Admin365`, et **vérifie strictement** que le tenant et le compte connectés sont ceux demandés. En cas d'écart, il s'arrête sans rien lire ni écrire.
 4. **Lit l'état du tenant** et **affiche un plan** : pour chaque élément, `CRÉER`, `METTRE À JOUR`, `OK`, `BLOQUÉ` ou `IGNORÉ`, avec la raison. Avec `-WhatIf`, le script s'arrête ici.
-5. **Demande confirmation**, puis applique dans cet ordre : application, principal de service, permissions, consentement, rôles Exchange, liste EWS, certificat, compte de service, mot de passe du compte de service (réinitialisé **avant** l'écriture du connecteur, voir [section 7](#7-le-compte-de-service)), connecteur Cloudiway, puis nettoyage des anciens certificats et secrets de l'outil (seulement après l'écriture réussie du connecteur).
+5. **Demande confirmation**, puis applique dans cet ordre : application, principal de service, permissions, consentement, rôles Exchange, liste EWS, compte de service, mot de passe du compte de service (réinitialisé **avant** la création du certificat et du secret, voir [section 7](#7-le-compte-de-service)), certificat et secret client, connecteur Cloudiway, puis nettoyage des anciens certificats et secrets de l'outil (seulement après l'écriture réussie du connecteur).
 6. **Relit chaque élément** pour vérifier la conformité (y compris le connecteur Cloudiway, relu après chaque écriture).
 7. **Écrit un rapport et un journal**, sans aucun secret, avec les actions restant à faire.
 
@@ -177,7 +168,7 @@ Avec `-ConnectorId 123`, la configuration (secrets masqués) du connecteur 123 e
 .\cloudiway-connector.cmd -Mode Source -Tenant contoso.onmicrosoft.com -Admin365 admin365@contoso.com -Cloudiway paul.bernard@contoso.com -ProjectId 12345 -Workloads Mail,OneDrive -WhatIf
 ```
 
-Le script se connecte (Cloudiway, puis le tenant), **lit** l'état actuel, affiche le **plan** et s'arrête : **rien n'est écrit** dans le tenant ni dans Cloudiway. La lecture de la configuration EWS d'Exchange Online a lieu aussi en simulation (lecture seule). Relisez le plan : chaque ligne dit ce qui serait créé, mis à jour, ou bloqué, et pourquoi.
+Depuis la version 2.9, la simulation rend le code `1` quand le plan contient au moins une ligne `BLOQUÉ` (hors lignes purement informatives), `0` sinon. Le script se connecte (Cloudiway, puis le tenant), **lit** l'état actuel, affiche le **plan** et s'arrête : **rien n'est écrit** dans le tenant ni dans Cloudiway. La lecture de la configuration EWS d'Exchange Online a lieu aussi en simulation (lecture seule). Relisez le plan : chaque ligne dit ce qui serait créé, mis à jour, ou bloqué, et pourquoi.
 
 ### 5.3 Appliquer
 
@@ -199,7 +190,7 @@ Si le plan contient une ligne `BLOQUÉ`, lisez la raison avant de continuer : el
 
 **Après chaque exécution du script, soumettez de nouveau l'audit du connecteur dans le portail Cloudiway, et vérifiez que la limite de licences du projet n'est pas à 0** (« Project Settings »).
 
-**Consentement de « Microsoft Graph Command Line Tools ».** Pour agir dans votre tenant, le script se connecte avec l'application publique de Microsoft « Microsoft Graph Command Line Tools » et demande des droits délégués élevés : `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`, `DelegatedPermissionGrant.ReadWrite.All`, `RoleManagement.ReadWrite.Directory`, `User.ReadWrite.All`, `Directory.Read.All`, `Policy.Read.All`, `Organization.Read.All`. Le consentement que vous acceptez dans la fenêtre Microsoft reste **enregistré dans le tenant** (pour votre compte, ou pour toute l'organisation si vous cochez la case correspondante). Pour le retirer en fin de projet : Entra > Applications d'entreprise > Microsoft Graph Command Line Tools > Autorisations.
+**Consentement de « Microsoft Graph Command Line Tools ».** Pour agir dans votre tenant, le script se connecte avec l'application publique de Microsoft « Microsoft Graph Command Line Tools » et demande des droits délégués élevés : `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`, `DelegatedPermissionGrant.ReadWrite.All`, `RoleManagement.ReadWrite.Directory`, `User.ReadWrite.All`, `User-PasswordProfile.ReadWrite.All` (**nouveau en 2.9**), `Directory.Read.All`, `Policy.Read.All`, `Organization.Read.All`. La nouvelle portée est demandée à **chaque** connexion, y compris à la première création et avec `-WhatIf` : une **nouvelle fenêtre de consentement** apparaît au premier passage en 2.9, et un refus de consentement peut empêcher la connexion. Le consentement que vous acceptez dans la fenêtre Microsoft reste **enregistré dans le tenant** (pour votre compte, ou pour toute l'organisation si vous cochez la case correspondante). Pour le retirer en fin de projet : Entra > Applications d'entreprise > Microsoft Graph Command Line Tools > Autorisations.
 
 ### 5.4 Quand la fenêtre de connexion reprend le mauvais compte (`-UseDeviceCode`)
 
@@ -247,32 +238,26 @@ Depuis la version 2.7, si une session Exchange Online d'**un autre tenant** (ou 
 
 L'option avancée `-AllowForeignSession` (usage consultant, désactivée par défaut) rétablit l'ancien comportement non bloquant (avertissement, étape EWS manuelle, code 2) ; ne l'utilisez pas en exploitation normale. Fermez la console quand vous avez terminé un tenant.
 
-## 6. La charge SharePoint et l'identifiant de produit Cloudiway
+## 6. Les charges SharePoint et Teams et les identifiants de produit Cloudiway
 
-Un connecteur Cloudiway déclare ses charges par des **identifiants de produits** (`rawProductList`). Connus de l'outil : **Mail = 5** et **Fichiers (OneDrive) = 6**. L'identifiant du produit Cloudiway pour **SharePoint (Sites)** est **inconnu** à ce jour : l'outil ne le devine pas (le faire correspondre au produit 6 donnerait l'illusion d'un support SharePoint qui n'existe pas sur le connecteur). Il en va de même des autres charges dont le produit est inconnu (elles sont de toute façon refusées dans cette version).
+Un connecteur Cloudiway déclare ses charges par des **identifiants de produits** (`rawProductList`). Depuis la version 2.8, l'outil les intègre **par défaut** :
 
-**Conséquence : arrêt rapide.** Si vous demandez SharePoint (ou `-Workloads All`, qui l'inclut) sans fournir l'identifiant :
+| Charge | Identifiant | État |
+|---|---|---|
+| Mail | 5 | connu |
+| OneDrive (Fichiers) | 6 | connu |
+| SharePoint (Sites) | 7 | **confirmé en réel** : la case « Site » est cochée dans le portail après écriture d'un connecteur `[5,6,7]` |
+| Teams | 8 | **PROVISOIRE** : accepté par l'API, à confirmer par comparaison avec un connecteur créé par l'interface (qui n'offre que Mail, File et « Sites, Collaborations ») |
 
-- le script **s'arrête à l'étape 1, avec le code de sortie `1`, avant toute connexion et toute écriture** ;
-- le message est « l'identifiant du produit Cloudiway pour SharePoint n'est pas connu : relancez avec -ProductIds ou un fichier ProductMap.json, ou retirez SharePoint de -Workloads » ;
-- **rien n'est créé ni modifié** : ni application, ni rôle, ni compte de service dans le tenant, ni connecteur dans Cloudiway, y compris pour Mail et OneDrive demandés en même temps ; aucun certificat ni secret n'est généré.
+`-ProductIds` (liste **complète** des produits à déclarer, par exemple `5,6,7`) et un fichier `productmap.json` (ou `-ProductMapFile`) restent des **surcharges**, utiles si Cloudiway vous communique un autre identifiant. Format du fichier `{ "SharePoint": 12 }` : il ne surcharge que les charges citées. Le fichier `productmap.example.json` livré avec le script est un **exemple dont les valeurs sont FICTIVES** (`99999`, et une clé `_exemple_fictif_...` ignorée par l'outil) : ne le copiez pas tel quel. Le fichier est contrôlé **avant toute connexion** (fichier introuvable, JSON invalide ou valeur non numérique : arrêt, code 1).
 
-(Cette règle ne s'applique pas avec `-SkipCloudiway`, qui configure le tenant seulement et ne déclare aucun connecteur.)
+**Arrêt rapide pour les produits restant inconnus.** Les charges Archive, GalSync et Intune ont un identifiant toujours inconnu ; elles sont refusées dans cette version. Un identifiant inconnu arrête le script à l'étape 1 (code 1, avant toute connexion et toute écriture).
 
-**Fournir l'identifiant** (il vous est communiqué par Cloudiway ; demandez-le à votre contact 3SR) :
+**Ce qui n'est pas validé.** Des connecteurs avec les produits Site (7) et Group (8) ont été créés en réel sur un projet de test, mais **aucune migration SharePoint ou Teams réelle n'a été faite à ce jour** (voir [section 17](#17-ce-qui-est-validé-en-réel-et-ce-qui-ne-lest-pas)).
 
-- `-ProductIds 5,6,<identifiant>` : liste **complète** des produits à déclarer sur le connecteur ;
-- ou un fichier JSON : `-ProductMapFile .\productmap.json`, qui ne surcharge que les charges citées (Mail = 5 et OneDrive = 6 gardent leur valeur). Si un fichier nommé **`productmap.json`** est placé à côté du script, il est utilisé automatiquement.
+**Permissions à présenter au DSI avant de confirmer.** Ajouter SharePoint ou Teams ajoute des permissions d'application avec consentement administrateur, dont des permissions d'**écriture sur la cible** (tableaux de l'introduction : `Group.ReadWrite.All`, `User.ReadWrite.All`, `Application.ReadWrite.All`, `Teamwork.Migrate.All`, `Chat.ReadWrite.All`, `Tasks.ReadWrite.All`, `TermStore.ReadWrite.All` côté SharePoint). **Ne demandez que les charges nécessaires** ; relisez le plan (`-WhatIf`) avant de confirmer.
 
-Format du fichier (une charge de travail, puis un identifiant ou une liste d'identifiants) :
-
-```json
-{ "SharePoint": 12 }
-```
-
-Le fichier `productmap.example.json` livré avec le script est un **exemple dont les valeurs sont FICTIVES** (`99999`, et une clé `_exemple_fictif_...` ignorée par l'outil) : **ne le copiez pas tel quel** sous le nom `productmap.json`, remplacez la valeur par l'identifiant réel fourni par Cloudiway. Le fichier est contrôlé **avant toute connexion** (fichier introuvable, JSON invalide ou valeur non numérique : arrêt avec un message, code 1).
-
-L'identifiant réel du produit SharePoint et la migration de SharePoint n'ont **pas été validés en réel** (voir [section 17](#17-ce-qui-est-validé-en-réel-et-ce-qui-ne-lest-pas)).
+**Teams, en plus.** Teams demande une **licence incluant Teams sur le compte de service** (jamais attribuée par l'outil) et l'**exclusion du compte de service de l'accès conditionnel MFA** pendant les migrations de chats et de canaux (le script le rappelle dans « À faire » et « À vérifier »). En Source, deux URI de redirection Cloudiway sont déclarées sur l'application.
 
 ## 7. Le compte de service
 
@@ -280,8 +265,8 @@ Cloudiway exige **ensemble**, pour la charge Mail, **en Source comme en Cible** 
 
 | Mode | Charges qui créent un compte de service |
 |---|---|
-| Source | **Mail**, SharePoint |
-| Cible | **Mail**, OneDrive, SharePoint |
+| Source | **Mail**, SharePoint, Teams |
+| Cible | **Mail**, OneDrive, SharePoint, Teams |
 
 **Ce compte est donc créé dès que Mail est demandé, y compris dans le tenant Source.** Il n'est **jamais supprimé par l'outil** : le DSI le supprime en fin de projet ([section 12](#12-retirer-les-objets-en-fin-de-projet)). Avec **OneDrive en Source seul**, aucun compte de service n'est créé.
 
@@ -300,11 +285,30 @@ Cloudiway exige **ensemble**, pour la charge Mail, **en Source comme en Cible** 
 - Si les **valeurs de sécurité par défaut** sont **actives** sur le tenant, la MFA est imposée à tous les comptes, **compte de service compris** : les jobs **OneDrive et SharePoint** de ce tenant **échoueront** à l'authentification du compte de service ; le **courrier** (Mail) n'est pas concerné par cet échec. Le script affiche un **avertissement visible** au moment du plan et en **première ligne de « À vérifier »** dans le rapport. Options : (1) désactiver les valeurs de sécurité par défaut au profit d'un **accès conditionnel ciblé qui exclut le compte de service**, ou (2) renoncer à OneDrive et SharePoint pour ce tenant. Le script ne modifie **jamais** ce paramètre.
 - Si une stratégie d'accès conditionnel impose la MFA à ce compte, excluez-le. Le script ne devine pas la politique de votre tenant et ne la modifie jamais ; ne désactivez jamais la MFA du tenant lui-même.
 
-**À la relance : le mot de passe est réinitialisé AVANT d'être envoyé.** Quand une exécution doit renvoyer un mot de passe au connecteur (renouvellement par défaut), le script le réinitialise **d'abord dans Entra** et ne l'envoie au connecteur **que si Entra l'a accepté**.
+**À la relance : le mot de passe est réinitialisé AVANT la création du certificat et du secret.** Quand une exécution doit renvoyer un mot de passe au connecteur (renouvellement par défaut), le script le réinitialise **d'abord dans Entra**, puis seulement crée le certificat et le secret, puis met à jour le connecteur.
 
-- **Si Entra refuse** (par exemple `HTTP 403`) : **le connecteur n'est pas modifié**. L'outil **ne touche ni au connecteur, ni à l'ancien certificat** : le connecteur garde son ancien certificat et son ancien mot de passe, aucun `PUT` n'est émis, l'ancien certificat n'est pas retiré de l'application. Le nouveau certificat déjà ajouté à l'application est conservé pour la relance suivante. Le code de sortie est `2`.
-- **Relancer avec `-KeepCredentials` n'y change rien.** Réinitialisez le mot de passe du compte de service à la main (centre d'administration Microsoft Entra), ressaisissez-le dans le portail Cloudiway (compte de migration du connecteur), puis relancez.
-- **Validé une fois en réel** : sur un tenant de test en mode Cible, deux relances successives ont réinitialisé le mot de passe du compte de service avec succès (code de sortie `0`, connecteur mis à jour). La garde ci-dessus reste en place si Entra refuse, sans plus. Le script ne crée plus le compte de service quand l'exécution s'arrête pour un identifiant de produit inconnu. Si un compte existant a été **adopté** (`-AdoptExisting`), l'outil ne réinitialise jamais son mot de passe : saisissez-le dans le connecteur, sur le portail Cloudiway.
+**Droits nécessaires à la réinitialisation (version 2.9).**
+
+- La portée déléguée Microsoft Graph `User-PasswordProfile.ReadWrite.All`, décrite par la documentation Microsoft comme la moins privilégiée pour modifier un mot de passe ; elle manquait dans les versions antérieures. **L'effet de son ajout sur le refus `HTTP 403` constaté avec une version antérieure n'a pas été mesuré.**
+- Le compte `-Admin365` doit être **Administrateur général** ou **Privileged Authentication Administrator** : le compte de service détient un rôle d'administrateur (le reste de la configuration demande par ailleurs un Administrateur général).
+- Les portées accordées à la session sont lues avant le plan. Si elles sont lisibles et que la portée manque (jeton `Directory.AccessAsUser.All` accepté comme équivalent, non vérifié), la ligne « Mot de passe » est **`BLOQUÉ`** : aucun certificat ni secret n'est créé et le connecteur n'est pas modifié. Si elles ne sont pas lisibles, rien n'est supposé (sauf pour un jeton fourni par `-GraphAccessToken` : la portée est alors considérée absente).
+
+**Si Entra refuse** (par exemple `HTTP 403`) : **aucun certificat ni secret n'est créé** dans l'application, **le connecteur n'est pas modifié** (il garde son certificat et son mot de passe) et le script le signale (code de sortie différent de `0`). Corrigez le consentement ou le rôle puis relancez ; à défaut, réinitialisez le mot de passe à la main (centre d'administration Microsoft Entra) et ressaisissez-le dans le portail Cloudiway (compte de migration du connecteur). `-KeepCredentials` ne corrige pas un refus.
+
+**Désynchronisation possible.** Le mot de passe est changé dans Entra avant l'écriture du connecteur : si une étape suivante échoue, le connecteur garde l'ancien mot de passe et les jobs qui utilisent ce compte échouent. Le script le signale (« DESYNCHRONISATION POSSIBLE », code `2`). Relancez la même commande **sans `-KeepCredentials`** (avec cette option, les identifiants ne sont pas refaits).
+
+**Compte adopté** (`-AdoptExisting`, compte non créé par l'outil) : l'outil ne réinitialise jamais son mot de passe. Pour mettre à jour un connecteur qui porte ce compte, fournissez le mot de passe avec `-ServiceAccountPassword` (version 2.9) ; sans lui la mise à jour est **bloquée** (voir ci-dessous). Pour un connecteur nouvellement créé sans mot de passe, saisissez-le dans le portail Cloudiway (le « À faire » peut encore le demander même quand `-ServiceAccountPassword` a été fourni). L'outil ne peut pas vérifier que le mot de passe fourni est exact.
+
+**Saisir le mot de passe sans l'écrire en clair**, depuis une console `pwsh` (le lanceur `.cmd` ne peut pas transmettre une `SecureString`) :
+
+```powershell
+$p = Read-Host -AsSecureString 'Mot de passe du compte de service adopté'
+.\cloudiway-connector.ps1 -Mode Source -Tenant contoso.onmicrosoft.com -Admin365 admin365@contoso.com -Cloudiway paul.bernard@contoso.com -Workloads Mail -AdoptExisting -ServiceAccountPassword $p -WhatIf
+```
+
+N'écrivez jamais `ConvertTo-SecureString '...' -AsPlainText` : le mot de passe resterait dans l'historique PSReadLine, les transcriptions et le journal des blocs de script de Windows.
+
+**Mise à jour du connecteur sans mot de passe : bloquée.** Le portail Cloudiway ne rend pas à la lecture le mot de passe du compte de migration ni le secret client. La mise à jour est donc **refusée** quand elle partirait sans le mot de passe d'un compte que le connecteur détient (compte adopté sans `-ServiceAccountPassword`, `-WithoutServiceAccount`, charges sans compte de service) ou sans le secret client qu'il déclare (`-AuthMethod Certificate`) : aucun identifiant n'est alors généré et la ligne Cloudiway est `BLOQUÉ`. `-AllowConnectorUpdateWithoutPassword` (usage avancé, désactivé par défaut) lève ce blocage : **l'effet d'une telle mise à jour sur la valeur conservée par le portail n'a pas été mesuré, elle pourrait l'effacer**. Ne l'utilisez que sur un connecteur de test, puis vérifiez qu'un audit démarre.
 
 ## 8. Objets créés et noms codifiés
 
@@ -326,13 +330,13 @@ Le certificat et le secret client sont valables **180 jours** par défaut (`-Val
 
 **Chaque exécution (hors `-WhatIf`) renouvelle les identifiants** : le certificat et, avec la méthode par défaut `Both`, le secret client. Concrètement, à chaque lancement :
 
-1. un **nouveau certificat** et un **nouveau secret client** sont générés en mémoire et ajoutés à l'application ;
-2. si un compte de service existe, son **mot de passe est réinitialisé dans Entra avant l'écriture du connecteur** (voir [section 7](#7-le-compte-de-service) pour le cas du refus) ;
+1. si un compte de service géré par l'outil existe, son **mot de passe est réinitialisé dans Entra d'abord** (voir [section 7](#7-le-compte-de-service) pour le cas du refus) ;
+2. un **nouveau certificat** et un **nouveau secret client** sont ensuite générés en mémoire et ajoutés à l'application ;
 3. le **connecteur Cloudiway est mis à jour** avec le nouveau certificat, son mot de passe et le nouveau secret (le certificat est remplacé sur place) ;
 4. le script **relit le connecteur** et ne considère l'écriture confirmée que si le nom de fichier du certificat relu est bien celui envoyé ;
-5. seulement alors, les **anciens certificats et anciens secrets créés par l'outil** sont retirés de l'application (jamais avant : un connecteur ne perd jamais son authentification) ; pour les secrets, le script relit l'application et attend la propagation côté Entra. Les clés posées à la main sont conservées. L'identifiant (`keyId`) et l'empreinte de chaque clé retirée figurent dans le rapport et le journal.
+5. seulement alors, les **anciens certificats et anciens secrets créés par l'outil** sont retirés de l'application (jamais avant : un connecteur ne perd jamais son authentification) ; pour les certificats comme pour les secrets, le script relit l'application avec des attentes successives (0, 2, 4, 8, 12, 18 s) avant de conclure que le nouveau est absent (propagation Entra). Les clés posées à la main sont conservées. L'identifiant (`keyId`) et l'empreinte de chaque clé retirée figurent dans le rapport et le journal.
 
-**Résultat attendu après une relance : un seul certificat et un seul secret client** dans l'application, un **marqueur** de certificat qui change (nom de fichier `CIW1_...`), et **le même connecteur** (il n'est pas recréé). Constaté en réel en Source et en Cible (voir [section 17](#17-ce-qui-est-validé-en-réel-et-ce-qui-ne-lest-pas)).
+**Résultat attendu après une relance : un seul certificat et un seul secret client** dans l'application, un **marqueur** de certificat qui change (nom de fichier `CIW1_...`), et **le même connecteur** (il n'est pas recréé). Constaté en réel en Source et en Cible **avec des versions antérieures**, non rejoué avec la 2.9 (voir [section 17](#17-ce-qui-est-validé-en-réel-et-ce-qui-ne-lest-pas)).
 
 **Le secret client est masqué par le portail Cloudiway** : il n'est pas possible de le relire pour vérifier qu'il a été pris en compte. La preuve est le **démarrage de l'audit** du connecteur dans le portail : **re-soumettez l'audit après chaque mise à jour du connecteur**, et vérifiez que la limite de licences du projet n'est pas à 0 (« Project Settings »).
 
@@ -342,19 +346,48 @@ Si l'écriture du connecteur échoue ou ne peut pas être confirmée, **aucun an
 
 ## 10. La liste EWS d'Exchange Online
 
-Pour la charge **Mail**, Cloudiway utilise EWS. Si votre organisation restreint EWS à une liste d'applications (`EwsAllowedAppIDs`), l'application Cloudiway doit y figurer. Le script :
+Pour la charge **Mail**, Cloudiway utilise EWS, et l'application doit figurer dans la liste `EwsAllowedAppIDs` du tenant lorsque celle-ci est appliquée. **Le paramètre `-EwsAllowedAppIDs` de `Set-OrganizationConfig` remplace toute la liste.** Le comportement décrit ici est celui du code de la 2.9, vérifié sur le banc hors ligne seulement.
 
-1. se connecte à Exchange Online avec le compte `-Admin365` ;
-2. **lit** la configuration (`Get-OrganizationConfig`), y compris en simulation ;
-3. **ajoute** l'AppID de l'application à `EwsAllowedAppIDs` : ajout seul, **jamais de remplacement ni de retrait** des entrées existantes.
+**Lecture.** La liste n'est renvoyée que par `Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy` (documentation Microsoft) : sans ce commutateur la propriété peut sortir vide alors que la liste existe. Le script se connecte à Exchange Online avec le compte `-Admin365`, lit `EwsEnabled` par la lecture simple et la liste avec le commutateur, y compris en simulation. Une collection ou une chaîne unique « a,b » sont toutes deux traitées. Commandes de lecture seule, à lancer vous-même avant et après :
 
-**Avertissement : une liste vide devient restrictive.** Si `EwsAllowedAppIDs` est **vide**, y inscrire une première application la rend **restrictive pour toutes les autres applications EWS du tenant** (outils de sauvegarde, applications mobiles tierces, etc.) qui n'y figurent pas : elles seraient **bloquées**. Le script demande donc une **confirmation explicite séparée** (réponse par défaut : non). Sans confirmation, rien n'est écrit et la ligne passe en « À vérifier » avec les commandes exactes ; avec `-Yes`, rien n'est écrit non plus, sauf si vous ajoutez `-AllowEwsListCreation`. Si la liste contient déjà des entrées, l'AppID y est simplement ajouté. **Par défaut, une liste vide n'est donc jamais créée** : l'étape EWS est ignorée (« À vérifier », code de sortie 2) sauf confirmation explicite ou `-AllowEwsListCreation`.
+```powershell
+Get-OrganizationConfig | Format-List EwsEnabled
+Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy | Format-List EwsEnabled, EwsAllowedAppIDs
+```
 
-Si `EwsEnabled` vaut `False` (EWS désactivé pour l'organisation), **rien n'est écrit** : c'est une décision du tenant, signalée dans « À vérifier ».
+**Aucune écriture** dans les cas suivants (signalés dans le plan, « À faire » ou « À vérifier ») :
 
-Tout échec Exchange (module absent, connexion, lecture, écriture) est **non bloquant** : le reste est configuré, l'étape devient un « À faire » manuel avec les commandes exactes, et le code de sortie est 2. Les commandes manuelles se terminent par un conseil : fermez la console PowerShell après usage.
+- commutateur indisponible dans le module `ExchangeOnlineManagement` installé, ou lecture avec le commutateur en échec, **même avec `-AllowEwsListCreation`** (une liste illisible n'est pas une liste vide) ;
+- relecture, juste avant l'écriture, où manque une entrée vue au moment du plan ;
+- liste existante contenant une valeur qui n'est pas un GUID ;
+- valeur actuelle impossible à sauvegarder dans `run.log` ;
+- `EwsEnabled = False`.
 
-Compter 5 à 10 minutes de propagation côté Microsoft après l'ajout.
+Une lecture impossible (module, connexion, commutateur) ou une écriture en échec ou non confirmée donne le code de sortie `2`. `EwsEnabled = False` et le refus de créer une liste vide ne changent pas à eux seuls le code de sortie : lisez « À vérifier ».
+
+**Écriture : aucune entrée existante n'est retirée.** La valeur écrite est toujours la liste relue plus l'AppID ; un contrôle interne refuse toute valeur qui perdrait une entrée. Après l'écriture, la liste est relue avec le commutateur (jusqu'à trois lectures sur environ 15 secondes) : toutes les entrées d'avant et l'AppID doivent être présents, sinon l'étape est en échec et le retour arrière est affiché. Une relecture trop précoce peut ne pas confirmer une écriture réussie : relisez plus tard, sans réécrire.
+
+**Sauvegarde et retour arrière.** Avant toute écriture, la valeur lue est inscrite dans `run.log` (ligne « EWS SAUVEGARDE »), avec la commande de retour arrière, reprise dans le rapport (« À vérifier »). Cette commande réécrit **exactement la valeur d'avant** :
+
+- elle efface donc aussi toute entrée ajoutée depuis par quelqu'un d'autre : relisez la liste avant de l'exécuter ;
+- si la valeur d'avant était vide, la commande écrit `$null` ; avec `EwsEnabled = True`, une liste vide peut bloquer tout EWS : ne l'exécutez pas sans l'accord de l'administrateur du tenant ;
+- conservez `run.log` et le rapport : la sauvegarde n'existe que sur le poste qui a exécuté le script.
+
+**Liste vide.** La définir la rend **restrictive pour toutes les autres applications EWS du tenant** (sauvegarde, applications tierces, etc.) quand la liste est appliquée. Le script demande une **confirmation explicite séparée** (réponse par défaut : non). Avec `-Yes`, rien n'est écrit, sauf avec `-AllowEwsListCreation`. Sans accord, rien n'est écrit.
+
+**`EwsEnabled`** (le script ne le modifie jamais) :
+
+| Valeur | Effet selon la documentation Microsoft | Ce que fait le script |
+|---|---|---|
+| `Null` (non défini) | La liste est ignorée pour l'instant (tout EWS est autorisé) ; Microsoft fait passer les tenants `Null` à `False` depuis le 2026-10-01 | Écrit la liste et le signale. Ordre conseillé : définir la liste, vérifier, attendre 24 h, puis seulement activer EWS (décision de l'administrateur), sans changer les deux en même temps. Une fois à `True`, seules les applications de la liste accèdent à EWS : faites d'abord leur inventaire |
+| `True` | La liste est appliquée | Ajoute l'AppID à la liste |
+| `False` | EWS est bloqué, la liste ne sert à rien | N'écrit rien |
+
+**Délai : jusqu'à 24 heures** selon Microsoft pour qu'un changement de liste prenne effet. Un succès ou un échec immédiat d'un job Cloudiway ne prouve rien.
+
+**Étape manuelle.** Tout échec Exchange est **non bloquant** : le reste est configuré et le script affiche les commandes exactes. Elles lisent la liste avec le commutateur, réécrivent la liste lue plus l'AppID, et n'écrivent rien (avertissement) si la lecture a échoué. Copiez chaque ligne entière, dans une console neuve connectée au bon tenant, puis fermez-la.
+
+**Tenants déjà traités par une version antérieure.** Lisez l'état réel avec les commandes de lecture ci-dessus (aucune écriture). Si `EwsEnabled` vaut `True` (ou doit être activé) et que la liste ne contient que l'AppID de l'outil, vérifiez avec le responsable du tenant qu'aucune autre application EWS n'a été coupée.
 
 ## 11. Lire le résultat et fichiers produits
 
@@ -364,11 +397,11 @@ Compter 5 à 10 minutes de propagation côté Microsoft après l'ajout.
 - **Application** : résultat de chaque action (`APPLIQUÉ`, `ÉCHEC`, `IGNORÉ`).
 - **Vérification** : relecture de chaque objet (`Conforme`, `À vérifier`, `NON CONFORME`).
 - **À faire** : actions réelles que le script n'a pas pu réaliser (par exemple le consentement administrateur manquant, avec le lien à ouvrir, ou l'étape Exchange à faire à la main, avec les commandes exactes). Le groupe n'apparaît que s'il y a quelque chose à faire.
-- **À vérifier** : informations et contrôles que le script ne peut pas automatiser (par exemple l'avertissement sur les valeurs de sécurité par défaut, en première ligne, la date d'expiration du certificat, ou une liste EWS vide).
+- **À vérifier** : informations et contrôles que le script ne peut pas automatiser (par exemple l'avertissement sur les valeurs de sécurité par défaut, en première ligne, la date d'expiration du certificat, ou la commande de retour arrière de la liste EWS).
 
 Le script ne se déclare « conforme » que si **tout** a été relu et confirmé. Voir [section 15](#15-codes-de-sortie) pour les codes de sortie.
 
-Le script écrit dans un dossier `connecteur-resultats` à côté du script (ou, si le dossier du script est synchronisé ou partagé, dans `%LOCALAPPDATA%\CloudiwayConnector`, ce qu'il signale ; `-OutDir` permet de choisir). Chaque exécution crée un sous-dossier `<préfixe>-<Source|Target>-<AAAAMMJJ-HHMM>` contenant **uniquement** :
+Le script écrit dans un dossier `connecteur-resultats` à côté du script (ou, si le dossier du script est synchronisé ou partagé, dans `%LOCALAPPDATA%\CloudiwayConnector`, ce qu'il signale ; `-OutDir` permet de choisir). Chaque exécution crée un sous-dossier `<préfixe>-<Source|Target>-<AAAAMMJJ-HHmmss>` (horodatage à la seconde depuis la 2.9) contenant **uniquement** :
 
 | Fichier | Contenu |
 |---|---|
@@ -388,9 +421,9 @@ Le script ne supprime rien (hors anciens certificats de l'outil). **À la fin du
 
 ```powershell
 Connect-ExchangeOnline -UserPrincipalName 'admin365@contoso.com'
-Get-OrganizationConfig | Select-Object EwsEnabled, EwsAllowedAppIDs
-$ids = @((Get-OrganizationConfig).EwsAllowedAppIDs) | Where-Object { $_ -and $_ -ne '<AppID de l''application>' }
-Set-OrganizationConfig -EwsAllowedAppIDs ($ids -join ',')
+$app = '<AppID de l''application>'; $cfg = $null; $avant = $null; $cfg = Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy
+if ($null -eq $cfg -or -not $cfg.PSObject.Properties['EwsAllowedAppIDs']) { Write-Warning 'Lecture avec -RetrieveEwsOperationAccessPolicy impossible : NE RIEN ECRIRE.' } else { $avant = @((@($cfg.EwsAllowedAppIDs) -join ',') -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }); "EwsEnabled=$($cfg.EwsEnabled) ; AVANT=$($avant -join ',')"; $reste = @($avant | Where-Object { $_ -ne $app }); if ($reste.Count -eq $avant.Count) { Write-Warning 'AppID absent de la liste lue : rien a retirer.' } elseif ($reste.Count -eq 0) { Write-Warning 'La liste deviendrait vide : NE RIEN ECRIRE, decision de l''administrateur requise.' } else { Set-OrganizationConfig -EwsAllowedAppIDs ($reste -join ',') } }
+Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy | Format-List EwsEnabled, EwsAllowedAppIDs
 ```
 
 Si l'AppID était la seule entrée, la liste se retrouve vide : consultez la documentation Microsoft de `Set-OrganizationConfig` pour la procédure à suivre dans ce cas. Ce cas n'a pas été exercé par l'outil. Si vous aviez confirmé la création de la liste (liste initialement vide), pensez que les autres applications EWS retrouvent leur accès une fois la liste vidée. Fermez ensuite la console (ne la réutilisez pas pour un autre tenant).
@@ -430,7 +463,7 @@ Les fichiers sont publiés en UTF-8 avec BOM et fins de ligne CRLF : une convers
 pwsh -NoProfile -File .\tests\run-tests.ps1
 ```
 
-Compter une dizaine de minutes. Le banc vérifie notamment qu'aucun secret n'est écrit, qu'aucune requête `DELETE` n'est émise, l'ordre des opérations, la vérification du certificat par nom de fichier avant tout retrait, le comportement du compte de service (création, garde au refus de réinitialisation du mot de passe), la liste EWS (ajout seul, confirmation sur liste vide), les modes Source et Cible et l'arrêt rapide pour SharePoint sans identifiant de produit.
+Compter une dizaine de minutes. Le banc vérifie notamment qu'aucun secret n'est écrit, qu'aucune requête `DELETE` n'est émise, l'ordre des opérations, la vérification du certificat par nom de fichier avant tout retrait, le comportement du compte de service (création, portée et rôle exigés, refus sans identifiant créé, blocage d'une mise à jour sans mot de passe), la liste EWS (lecture avec le commutateur, aucune perte d'entrée, sauvegarde, retour arrière, confirmation sur liste vide), les modes Source et Cible et les identifiants de produit par défaut (Mail 5, OneDrive 6, SharePoint 7, Teams 8).
 
 ## 14. Dépannage
 
@@ -439,14 +472,19 @@ Compter une dizaine de minutes. Le banc vérifie notamment qu'aucun secret n'est
 | Erreur `#requires` au lancement | Le script est lancé depuis Windows PowerShell 5.1. Utilisez `cloudiway-connector.cmd` ou ouvrez `pwsh` (PowerShell 7.2 minimum). |
 | `pwsh` introuvable ou trop ancien | Le lanceur propose l'installation avec `winget` après confirmation ; sinon `winget install --id Microsoft.PowerShell -e`. |
 | Module manquant | `Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser` (et `ExchangeOnlineManagement` pour Mail), ou `-InstallMissingModules`. |
-| « Charge de travail non disponible dans cette version » | Teams, Archive, GalSync, Intune, FreeBusy, Signature et MailRouting sont refusées. Disponibles : Mail, OneDrive, SharePoint. Aucune connexion n'a été tentée. |
-| « L'identifiant du produit Cloudiway pour SharePoint n'est pas connu » (code 1, avant toute connexion) | Voir [section 6](#6-la-charge-sharepoint-et-lidentifiant-de-produit-cloudiway) : fournissez `-ProductIds` ou `productmap.json`, ou retirez SharePoint de `-Workloads`. Rien n'a été créé. |
+| « Charge de travail non disponible dans cette version » | Archive, GalSync, Intune, FreeBusy, Signature et MailRouting sont refusées. Disponibles : Mail, OneDrive, SharePoint, Teams. Aucune connexion n'a été tentée. |
+| Teams : le connecteur ne montre pas la charge attendue dans le portail | L'identifiant de produit de Teams (8) est **provisoire** : comparez avec un connecteur créé par l'interface, ou surchargez avec `-ProductIds` / `productmap.json`. |
 | L'audit ne démarre pas dans le portail Cloudiway | Le secret client est masqué par le portail : la preuve de sa prise en compte est le démarrage de l'audit. Re-soumettez l'audit après chaque mise à jour du connecteur. Vérifiez que `-AuthMethod` est `Both` (défaut) : `Certificate` ou `Secret` seuls sont non recommandés. |
 | « Table de produits illisible » | Le fichier `productmap.json` ou `-ProductMapFile` est introuvable, n'est pas du JSON valide, ou contient une valeur non numérique. Arrêt avant toute connexion (code 1). |
 | « Connexion refusée : le tenant ou le compte ne correspond pas » | La fenêtre de connexion a repris un autre compte. Relancez en choisissant exactement le compte `-Admin365`, ou avec `-UseDeviceCode`. Pour un compte **invité** (identifiant contenant `#EXT#`), `-Admin365` doit être l'identifiant exact tel que le tenant l'affiche, et l'invité doit être Administrateur général **dans ce tenant**. |
 | Arrêt à l'étape des prérequis (code 1) : session Exchange Online d'un autre tenant | Une session Exchange Online d'un autre tenant (ou d'un autre compte) est ouverte dans la console. Fermez la console, ouvrez-en une **nouvelle** pour ce tenant, relancez la même commande (voir [section 5.8](#58-une-console-powershell-par-tenant)). |
 | Avertissement « Valeurs de sécurité par défaut ACTIVES » | La MFA est imposée à tous les comptes, compte de service compris : les jobs OneDrive et SharePoint de ce tenant échoueront ; le courrier non. Voir [section 7](#7-le-compte-de-service). Le script ne modifie jamais ce paramètre. |
-| « Le mot de passe du compte de service n'a pas pu être changé dans Entra » | Entra refuse la réinitialisation du mot de passe (par exemple HTTP 403). Le connecteur n'est pas modifié et l'ancien certificat n'est pas retiré ; `-KeepCredentials` n'y change rien. Réinitialisez le mot de passe à la main, ressaisissez-le dans le portail Cloudiway, puis relancez (voir [section 7](#7-le-compte-de-service)). |
+| « Le mot de passe du compte de service n'a pas pu être changé dans Entra » | Entra refuse la réinitialisation (par exemple HTTP 403). Aucun certificat ni secret n'est créé, le connecteur n'est pas modifié. Vérifiez la portée `User-PasswordProfile.ReadWrite.All` et le rôle du compte, puis relancez ; à défaut réinitialisez à la main (voir [section 7](#7-le-compte-de-service)). |
+| Ligne « Mot de passe » `BLOQUÉ` : portée absente | La session Graph ne porte pas `User-PasswordProfile.ReadWrite.All` : reconnectez-vous en acceptant le consentement, ou fournissez un jeton qui la porte. |
+| « DESYNCHRONISATION POSSIBLE » | Le mot de passe a été changé dans Entra mais le connecteur n'a pas été écrit : relancez la même commande sans `-KeepCredentials`. |
+| Ligne Cloudiway `BLOQUÉ` : mise à jour sans mot de passe ou sans secret client | Voir [section 7](#7-le-compte-de-service) : `-ServiceAccountPassword`, laisser l'outil gérer le compte, ou `-AuthMethod Both`. |
+| « Liste EwsAllowedAppIDs illisible » | Mettez à jour le module (`Update-Module ExchangeOnlineManagement`) dans une console neuve et relancez. Rien n'a été écrit. Voir [section 10](#10-la-liste-ews-dexchange-online). |
+| `-WhatIf` se termine avec le code `1` | Le plan contient une ligne `BLOQUÉ` : lisez sa raison. |
 | `AADSTS65001` | Le consentement n'a pas été donné pour « Microsoft Graph Command Line Tools » : reconnectez-vous avec un Administrateur général et acceptez la fenêtre de consentement. |
 | `AADSTS90094` | Le consentement administrateur est requis et le compte n'est pas Administrateur général (activez le rôle si vous passez par PIM). |
 | `AADSTS53003` | Accès bloqué par l'accès conditionnel (poste, localisation, application) : utilisez un poste ou un réseau autorisé, ou demandez une exception. |
@@ -465,8 +503,8 @@ Compter une dizaine de minutes. Le banc vérifie notamment qu'aucun secret n'est
 
 | Code | Signification |
 |---|---|
-| `0` | Conforme : tout est appliqué et vérifié (ou simulation réussie). |
-| `1` | Arrêt **avant toute écriture** : prérequis manquant, accès impossible, droits insuffisants, refus, annulation, ou lignes bloquées sans rien d'applicable. |
+| `0` | Conforme : tout est appliqué et vérifié, ou simulation sans ligne bloquée. |
+| `1` | Arrêt **avant toute écriture** : prérequis manquant, accès impossible, droits insuffisants, refus, annulation, lignes bloquées sans rien d'applicable, ou simulation (`-WhatIf`) dont le plan contient une ligne bloquée. |
 | `2` | Appliqué **avec des éléments en échec, ignorés, bloqués ou non conformes** (étape Exchange manuelle comprise, ligne Cloudiway bloquée comprise). Relancez la même commande après avoir lu le rapport. |
 
 Le lanceur `cloudiway-connector.cmd` transmet ces codes. Il ajoute ses propres codes : `10` (PowerShell 7.2 absent et non installé), `11` (installé mais introuvable depuis cette fenêtre : fermez-la et relancez), `12` (script principal introuvable), `13` (lancement impossible).
@@ -481,8 +519,8 @@ Le lanceur `cloudiway-connector.cmd` transmet ces codes. Il ajoute ses propres c
 | `-Cloudiway` | Votre identifiant sur le portail Cloudiway. Le mot de passe est demandé masqué. Demandé si absent. |
 | `-CloudiwayPat` | Jeton d'accès personnel Cloudiway (`SecureString`) à la place du mot de passe. **Non validé** : ce contournement existe dans l'outil mais n'a jamais été validé ; ne pas s'en servir comme solution à la 2FA. |
 | `-ProjectId` | Numéro du projet Cloudiway. Détecté automatiquement si possible. |
-| `-Workloads` | `Mail`, `OneDrive`, `SharePoint`, ou `All` (= les trois). Aucune valeur par défaut. Les autres charges sont refusées. SharePoint (donc `All`) sans identifiant de produit : arrêt rapide, code 1. |
-| `-WhatIf` | Simulation : plan seul, rien n'est écrit. À faire en premier. |
+| `-Workloads` | `Mail`, `OneDrive`, `SharePoint`, `Teams`, ou `All` (= les quatre). Aucune valeur par défaut. Les autres charges, dont `Archive`, sont refusées. `All` = ces quatre charges (donc leurs permissions d'écriture). |
+| `-WhatIf` | Simulation : plan seul, rien n'est écrit. À faire en premier. Code `1` si une ligne est bloquée. |
 | `-Discover` / `-ConnectorId` | Liste les connecteurs du projet (lecture seule, sans connexion au tenant) ; détail masqué d'un connecteur. |
 | `-UseDeviceCode` | Connexion Graph (et Exchange) par code d'appareil. |
 | `-KeepCredentials` | Contrôle de conformité : ne renouvelle rien tant que le certificat est cohérent et valable plus de 30 jours. |
@@ -495,11 +533,13 @@ Le lanceur `cloudiway-connector.cmd` transmet ces codes. Il ajoute ses propres c
 | `-AllowForeignSession` | Usage consultant (désactivé par défaut) : autorise une session Exchange Online d'un autre tenant dans la console au lieu d'arrêter le script. Voir [section 5.8](#58-une-console-powershell-par-tenant). |
 | `-GraphAccessToken`, `-ExchangeAccessToken`, `-CloudiwayPassword` | Usage avancé (automatisation), inutile en utilisation normale ; voir `Get-Help .\cloudiway-connector.ps1 -Full`. |
 | `-ServiceAccountName` | Remplace la partie locale du compte de service (doit commencer par `svc-ciw-`). Sans effet quand aucun compte de service n'est créé. |
-| `-AllowEwsListCreation` | Autorise sans question la création de la liste EWS quand elle est vide (la rend restrictive pour les autres applications EWS). |
+| `-ServiceAccountPassword` | Usage avancé (2.9) : mot de passe (`SecureString`) d'un compte de service **adopté**, envoyé au connecteur. À saisir avec `Read-Host -AsSecureString` (voir [section 7](#7-le-compte-de-service)). |
+| `-AllowConnectorUpdateWithoutPassword` | Usage avancé (2.9), désactivé par défaut : autorise une mise à jour du connecteur sans mot de passe ou sans secret client. Effet non mesuré. |
+| `-AllowEwsListCreation` | Autorise sans question la création de la liste EWS quand elle est vide (la rend restrictive pour les autres applications EWS). Sans effet si la liste est illisible. |
 | `-SkipCloudiway` | Configure le tenant seulement, sans appel à Cloudiway (`-ProjectId` obligatoire ; aucun certificat n'est généré, faute de moyen de le transmettre). |
-| `-ProductIds` | Liste **complète** des identifiants de produits Cloudiway à déclarer (Mail = 5, Fichiers = 6 ; SharePoint : à fournir, sinon arrêt rapide). |
+| `-ProductIds` | Surcharge : liste **complète** des identifiants de produits Cloudiway à déclarer (défauts intégrés : Mail = 5, OneDrive = 6, SharePoint = 7, Teams = 8 provisoire). |
 | `-ProductMapFile` | Fichier JSON de correspondance charges / produits (ne surcharge que les charges citées). Par défaut, un fichier `productmap.json` à côté du script est utilisé s'il existe. |
-| `-Region` | Région serveur Cloudiway (défaut 1). |
+| `-Region` | Région serveur Cloudiway, de 1 à 99 (défaut 1 ; `0` est refusé depuis la 2.9). |
 | `-CertificateTransport` | `Base64` (défaut) ou `Path` (fichier temporaire protégé, supprimé aussitôt). Seul `Base64` est recommandé. |
 | `-OutDir` | Dossier de base du rapport et du journal. |
 | `-InstallMissingModules` | Installe sans question les modules PowerShell manquants (profil utilisateur, sans droits administrateur). |
@@ -507,45 +547,43 @@ Le lanceur `cloudiway-connector.cmd` transmet ces codes. Il ajoute ses propres c
 
 ## 17. Ce qui est validé en réel, et ce qui ne l'est pas
 
-État au 04/11/2026, pour la version 2.7, **après validation en réel**. Cette section est volontairement franche : le banc de test hors ligne couvre ces cas avec un faux tenant et un faux portail, mais un faux n'est pas la réalité.
+État au 25/11/2026, pour la version 2.9. **La version 2.9 n'a jamais été exécutée sur un tenant Microsoft 365 réel ni sur le portail Cloudiway réel.** Elle est vérifiée uniquement par le banc de test hors ligne (faux tenant, faux portail) ; un faux n'est pas la réalité. Commencez par `-WhatIf`, puis par un tenant de test.
 
-**Validé en réel**
+**Non validé en réel pour la 2.9**
 
-- **Modes Source et Cible**, avec les charges **Mail** et **OneDrive** : création du connecteur avec certificat, secret client **et** compte administrateur (`-AuthMethod Both`, compte de service créé par défaut pour Mail), puis **audit réussi** et **migration de test lancée et en cours de traitement** (non terminée à la date de cet état).
-- **La relance** : après une relance, **un seul certificat et un seul secret client** restent dans l'application, le marqueur du certificat change, et c'est **le même connecteur** (Source et Cible).
-- **Vérification du certificat par nom de fichier** (relecture du connecteur après écriture).
-- **Retrait des anciens certificats** par le repli `PATCH` et des anciens secrets par `removePassword`.
-- **Code d'appareil** (Microsoft Graph et Exchange Online).
-- **Écriture EWS** sur une liste vide (création, avec confirmation). Par défaut, une liste vide **n'est jamais créée** sans confirmation ou `-AllowEwsListCreation` : l'étape est ignorée (code de sortie 2).
-- **Compte de service et rôle SharePoint Administrator créés** au premier passage, puis **mot de passe du compte de service renouvelé à la relance** : validé **une fois** sur un tenant de test en mode Cible (deux relances successives, code de sortie `0`, connecteur mis à jour).
-- **Secret client accepté par le portail**, mais **non vérifiable à la lecture** (le portail le masque).
+- **Lecture EWS avec le commutateur** : forme de la valeur renvoyée par Exchange, sauvegarde, retour arrière, relecture immédiate après écriture, longueur maximale de la liste, retour à `$null`.
+- **Ajout de l'AppID à une liste EWS qui contient déjà d'autres applications.**
+- **Portée `User-PasswordProfile.ReadWrite.All`** : elle manquait et a été ajoutée ; son effet sur le refus `HTTP 403` constaté avec une version antérieure n'a **pas été mesuré**.
+- **Mise à jour du connecteur sans mot de passe** (`-AllowConnectorUpdateWithoutPassword`) : comportement du portail inconnu. `-ServiceAccountPassword` : jamais exercé en réel.
+- **Nouvel ordre** (mot de passe avant certificat et secret) et blocages associés.
 
-**Non validé en réel, ou échec constaté**
+**Constats obtenus avec des versions antérieures (non rejoués avec la 2.9)**
 
-- **Migration de bout en bout** : la migration de test est lancée et en cours de traitement ; son résultat final n'est pas encore connu. Que le connecteur soit créé et l'audit réussi ne prouve pas que tous les jobs de migration aboutiront.
-- **SharePoint** : identifiant de produit **inconnu** (voir [section 6](#6-la-charge-sharepoint-et-lidentifiant-de-produit-cloudiway)), charge **non validée** en réel.
-- **Teams** : charge non disponible dans cette version, **non validée**.
-- **Retrait des anciens certificats par `POST removeKey`** : Microsoft répond `403` en conditions réelles ; l'outil utilise le repli `PATCH` (validé).
-- **Réinitialisation de ce mot de passe refusée par Entra** (par exemple `HTTP 403`) : cas géré par la garde (le connecteur n'est pas modifié, voir [section 7](#7-le-compte-de-service)) ; la réinitialisation manuelle est alors nécessaire.
-- **Ajout de l'AppID à une liste EWS qui contient déjà d'autres applications** : jamais exercé en réel.
-- **Compte invité (B2B)** comme administrateur du tenant.
-- **Poste derrière un proxy authentifié.**
-- **Windows PowerShell 5.1 sur un poste vierge** (lanceur `.cmd`).
-- **Rôle Lecteur général** (Global Reader) : le comportement avec ce seul rôle n'a pas été éprouvé.
-- **Options `-AuthMethod Certificate` ou `Secret` seuls, `-CertificateTransport Path`, `-Region` différent de 1.**
+- Modes Source et Cible, charges Mail et OneDrive : création du connecteur avec certificat, secret client et compte administrateur, **audit réussi** et **migration de test** lancée.
+- Relance : un seul certificat et un seul secret client restent dans l'application, même connecteur ; relecture du certificat par nom de fichier.
+- Retrait des anciens certificats : Microsoft a répondu `403` à `POST removeKey`, le repli `PATCH` a fonctionné ; anciens secrets retirés par `removePassword`.
+- Code d'appareil (Microsoft Graph et Exchange Online).
+- Compte de service et rôle SharePoint Administrator créés ; mot de passe renouvelé à la relance une fois sur un tenant de test, et refusé (`HTTP 403`) dans un autre cas.
+- Écriture EWS sur une liste considérée comme vide : la lecture se faisait **sans le commutateur**, ce constat ne prouve donc ni que la liste était vide ni le comportement de la 2.9.
+
+**Jamais validé en réel**
+
+- **SharePoint et Teams** : connecteurs avec les produits 7 et 8 créés sur un projet de test, mais **aucune migration réelle** ; l'identifiant de Teams (8) est provisoire.
+- Compte invité (B2B) comme administrateur ; poste derrière un proxy authentifié ; Windows PowerShell 5.1 sur un poste vierge ; rôle Lecteur général ; `-AuthMethod Certificate` ou `Secret` seuls, `-CertificateTransport Path`, `-Region` différent de 1.
 
 ### Limite connue constatée
 
-- **Double authentification (2FA) sur le compte Cloudiway : NON SUPPORTÉE.** La connexion au portail depuis le script **ne fonctionne pas** avec la 2FA (constaté en réel le 03/11/2026, chez un client). Prérequis explicite : le compte Cloudiway utilisé pour lancer le script ne doit pas avoir la 2FA activée ; si elle l'est, contactez votre contact 3SR. Un contournement par jeton d'accès personnel (`-CloudiwayPat`) existe dans l'outil, mais il n'a **jamais été validé** : ne le considérez pas comme une solution.
+- **Double authentification (2FA) sur le compte Cloudiway : NON SUPPORTÉE.** La connexion au portail depuis le script ne fonctionne pas avec la 2FA (constaté en réel avec une version antérieure). Le compte Cloudiway utilisé pour lancer le script ne doit pas avoir la 2FA activée ; si elle l'est, contactez votre contact 3SR. Le contournement par jeton d'accès personnel (`-CloudiwayPat`) n'a **jamais été validé**.
 
 ## 18. Limites de cette version
 
-- **Charges Mail, OneDrive et SharePoint seulement.** Les autres charges de travail sont refusées avec un message clair.
-- **SharePoint : arrêt rapide (code 1) tant que l'identifiant du produit n'est pas fourni**, avant toute connexion ; `-Workloads All` aussi (voir [section 6](#6-la-charge-sharepoint-et-lidentifiant-de-produit-cloudiway)).
-- **Après chaque exécution du script**, re-soumettez l'audit du connecteur dans le portail Cloudiway (le secret client est masqué par le portail : la preuve est le démarrage de l'audit) et vérifiez que la limite de licences du projet n'est pas à 0 (« Project Settings »).
-- Chaque exécution renouvelle le certificat et le secret et met à jour le connecteur existant : ne pas relancer pendant des jobs de migration actifs (voir [section 9](#9-renouvellement--chaque-exécution-renouvelle-le-certificat-et-le-secret)).
-- Si Entra refuse la réinitialisation du mot de passe d'un compte de service existant (par exemple `HTTP 403`), la garde bloque l'écriture du connecteur : réinitialisation manuelle (voir [section 7](#7-le-compte-de-service)).
+- **Charges Mail, OneDrive, SharePoint et Teams seulement.** Les autres, dont Archive, sont refusées avec un message clair.
+- **SharePoint et Teams : aucune migration réelle à ce jour** ; identifiant de Teams provisoire (voir [section 6](#6-les-charges-sharepoint-et-teams-et-les-identifiants-de-produit-cloudiway)). Leurs permissions d'écriture sur la cible sont à présenter au DSI avant de confirmer.
+- **Après chaque exécution du script**, re-soumettez l'audit du connecteur dans le portail Cloudiway et vérifiez que la limite de licences du projet n'est pas à 0 (« Project Settings »).
+- Chaque exécution renouvelle le certificat et le secret et met à jour le connecteur : ne pas relancer pendant des jobs de migration actifs (voir [section 9](#9-renouvellement--chaque-exécution-renouvelle-le-certificat-et-le-secret)).
+- Une relance avec moins de charges, `-WithoutServiceAccount` ou `-AuthMethod Certificate` sur un connecteur existant peut être bloquée (voir [section 7](#7-le-compte-de-service)).
+- Une erreur de réinitialisation du mot de passe bloque le renouvellement (voir [section 7](#7-le-compte-de-service)).
 - **Une console PowerShell par tenant** : une session Exchange Online d'un autre tenant arrête le script (code 1) tant que `-AllowForeignSession` n'est pas utilisé (voir [section 5.8](#58-une-console-powershell-par-tenant)).
 - Si les valeurs de sécurité par défaut sont actives, les jobs OneDrive et SharePoint échouent à l'authentification du compte de service (voir [section 7](#7-le-compte-de-service)).
 - Le script ne retire pas ses objets en fin de projet : la procédure est manuelle (voir [section 12](#12-retirer-les-objets-en-fin-de-projet)).
-- Le compte Cloudiway ne doit pas avoir la double authentification activée (voir [section 17](#17-ce-qui-est-validé-en-réel-et-ce-qui-ne-lest-pas)).
+- Le compte Cloudiway ne doit pas avoir la double authentification activée.

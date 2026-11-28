@@ -125,8 +125,8 @@ function Show-Banner([string]$Mode, [string]$TenantId, [string]$User, [string]$O
     $inner = $ui.Width - 2
     $fc = 'Cyan'
     $name = Get-UIApp 'AppName' '3SR - Configuration du connecteur Cloudiway'
-    $ver  = Get-UIApp 'AppVersion' '2.7'
-    $date = Get-UIApp 'AppDate' '04/11/2026'
+    $ver  = Get-UIApp 'AppVersion' '2.9'
+    $date = Get-UIApp 'AppDate' '25/11/2026'
     $mail = Get-UIApp 'AppContact' 'votre contact 3SR'
 
     $modeTxt = ''

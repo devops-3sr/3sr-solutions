@@ -73,6 +73,8 @@ function Protect-CiwText([string]$Text) {
     $vals = [System.Collections.Generic.List[string]]::new()
     foreach ($v in @($script:CiwSecrets)) { if ($v) { $vals.Add([string]$v) } }
     try {
+        $pv = Get-CiwProp $script:Ctx 'ProvidedServiceAccountPassword'   # v2.9 : mot de passe du compte adopte fourni en parametre
+        if ($pv -is [securestring]) { $pvp = ConvertFrom-SecureStringPlain $pv; if ($pvp) { $vals.Add([string]$pvp) }; $pvp = $null }
         foreach ($bag in @((Get-CiwProp $script:Ctx 'Secrets'), (Get-CiwProp $script:Ctx 'Credentials'))) {
             if ($bag -is [System.Collections.IDictionary]) {
                 foreach ($k in $bag.Keys) {
@@ -198,7 +200,36 @@ function Get-CiwTokenFromSetCookie($Cookies) {
     if ($jwt.Count -gt 0) { return $jwt[0].Value }
     $named = @($cands | Where-Object { $_.Name -match '(?i)token|auth|jwt|access|session' })
     if ($named.Count -gt 0) { return $named[0].Value }
-    return (@($cands | Sort-Object { $_.Value.Length } -Descending))[0].Value
+    # v2.9 : plus de dernier recours « le cookie le plus long » : un cookie quelconque (suivi, repartition de charge) ne doit jamais
+    # partir en en-tete Authorization. Aucun cookie reconnaissable = pas de jeton (le message d'echec de connexion habituel s'applique).
+    return $null
+}
+
+# v2.9 : secrets RELUS depuis le portail. Mesure reelle du 2026-11-25 : GET /Connectors et GET /Connectors/{id} renvoient EN CLAIR
+# connectorCertificate.secret (mot de passe du PFX) et connectorCertificate.certificateFile (PFX en Base64) ; RestClientSecret et
+# MigrationAccountPassword reviennent vides. Ces valeurs ne sont jamais ecrites par l'outil (journal, rapport, decouverte : cles masquees) ; elles
+# sont EN PLUS inscrites ici parmi les secrets connus pour etre retirees de tout message d'erreur (defense en profondeur). Ne leve jamais.
+function Register-CiwReadSecrets($Items) {
+    try {
+        $acc = [System.Collections.Generic.List[string]]::new()
+        foreach ($v in @($script:CiwSecrets)) { if ($v) { $acc.Add([string]$v) } }
+        foreach ($it in @($Items)) {
+            if ($null -eq $it) { continue }
+            $cc = Get-CiwProp $it 'connectorCertificate'
+            foreach ($n in 'secret', 'certificateFile', 'password') {
+                $v = Get-CiwProp $cc $n
+                if ($v -is [string] -and $v.Length -ge 4 -and -not (Test-CiwMasked $v) -and -not $acc.Contains($v)) { $acc.Add($v) }
+            }
+            $st = ConvertTo-CiwSettings $it
+            if ($st) {
+                foreach ($n in 'RestClientSecret', 'MigrationAccountPassword') {
+                    $v = Get-CiwProp $st $n
+                    if ($v -is [string] -and $v.Length -ge 4 -and -not (Test-CiwMasked $v) -and -not $acc.Contains($v)) { $acc.Add($v) }
+                }
+            }
+        }
+        $script:CiwSecrets = @($acc.ToArray())
+    } catch { }
 }
 
 function Get-CiwTokenViaCookies([string]$Body) {
@@ -638,6 +669,7 @@ function Find-CiwConnectors([string]$Name) {
         if (Test-CiwFailure $r) {
             $err = 'reponse sans succes (isSuccess = false) {0}' -f (Get-CiwFailText $r)
         } else {
+            Register-CiwReadSecrets @(Get-CiwData $r)   # v2.9 : la liste renvoie les secrets des certificats en clair
             $items = @(@(Get-CiwData $r) | Where-Object { $null -ne $_ -and (Get-CiwProp $_ 'name') -ieq $Name })
             if ($items.Count -gt 0) { return [pscustomobject]@{ Items = $items; Error = '' } }
         }
@@ -651,6 +683,7 @@ function Find-CiwConnectors([string]$Name) {
         if (-not (Test-CiwFailure $r)) {
             $data = Get-CiwData $r
             $items = if ($null -ne (Get-CiwProp $data 'items')) { @(Get-CiwProp $data 'items') } elseif ($null -ne (Get-CiwProp $data 'data')) { @(Get-CiwProp $data 'data') } else { @($data) }
+            Register-CiwReadSecrets @($items)
             $found = @($items | Where-Object { $null -ne $_ -and (Get-CiwProp $_ 'name') -ieq $Name })
             if ($found.Count -gt 0) { return [pscustomobject]@{ Items = $found; Error = '' } }
         }
@@ -668,6 +701,7 @@ function Get-CiwConnectorDetail([int]$Id) {
         if (Test-CiwFailure $r) { Set-CiwError ("lecture du detail du connecteur $Id impossible (isSuccess = false) {0}" -f (Get-CiwFailText $r)); return $null }
         $d = Get-CiwData $r
         if ($null -eq $d) { Set-CiwError "lecture du detail du connecteur $Id impossible (reponse vide)"; return $null }
+        Register-CiwReadSecrets @($d)   # v2.9 : le detail renvoie le mot de passe et le contenu du PFX en clair
         return $d
     } catch {
         Set-CiwError ("lecture du detail du connecteur $Id impossible : {0}" -f (Get-CiwErrMsg $_))
@@ -928,7 +962,9 @@ function Get-CiwDesired {
         Source            = $source
         AppId             = Get-CiwProp $created 'AppId'
         ServiceAccountUpn = Get-CiwProp $created 'ServiceAccountUpn'
-        ServiceAccountPwd = ConvertTo-CiwPlain (Get-CiwProp $cred 'ServiceAccountPassword')
+        # v2.9 : compte ADOPTE (mot de passe jamais genere par l'outil) : mot de passe fourni par -ServiceAccountPassword, s'il existe.
+        ServiceAccountPwd = $(if (Get-CiwProp $cred 'ServiceAccountPassword') { ConvertTo-CiwPlain (Get-CiwProp $cred 'ServiceAccountPassword') } elseif ([bool](Get-CiwProp $ctx 'ServiceAccountPasswordManual') -and (Get-CiwProp $ctx 'ProvidedServiceAccountPassword')) { ConvertTo-CiwPlain (Get-CiwProp $ctx 'ProvidedServiceAccountPassword') } else { $null })
+        Region            = $(if ($null -ne $region -and "$region" -ne '' -and [int]$region -ge 1) { [int]$region } else { 1 })   # v2.9 (m3) : valeur explicite, jamais un test de verite
         PfxBytes          = $bytes
         PfxPassword       = ConvertTo-CiwPlain (Get-CiwProp $cred 'PfxPassword')
         PfxFileName       = $certFile
@@ -938,7 +974,6 @@ function Get-CiwDesired {
         SecretKeyId       = "$(Get-CiwProp $cred 'SecretKeyId')"
         SecretNotAfter    = $(if ((Get-CiwProp $cred 'SecretNotAfter') -is [datetime]) { Get-CiwProp $cred 'SecretNotAfter' } else { $null })
         AuthMethod        = $auth
-        Region            = $(if ($region) { [int]$region } else { 1 })
         Transport         = $transport
         TenantName        = $tenantName
     }
@@ -1029,6 +1064,45 @@ function Get-CiwMissingAppReason($Detail, [string]$AppId) {
     if (-not $rc) { return '' }
     if (-not (Test-CiwOwnedConnector $Detail)) { return '' }
     return "le connecteur $(Get-CiwProp $Detail 'id') designe l'application $rc, qui n'existe pas dans ce tenant (supprimee, ou connecteur d'un autre tenant) : rien n'est modifie. Choisir un autre -ConnectorName, ou -AdoptExisting pour rattacher ce connecteur a une nouvelle application."
+}
+
+# v2.9 : une valeur secrete des parametres du connecteur est-elle LISIBLE dans la lecture (renseignee et non masquee) ? Mesure reelle du
+# 2026-11-25 : RestClientSecret et MigrationAccountPassword reviennent VIDES ; ils ne peuvent donc pas etre renvoyes tels quels dans un PUT.
+function Test-CiwSecretReadable($Detail, [string]$Key) {
+    $st = ConvertTo-CiwSettings $Detail
+    if (-not $st) { return $false }
+    $v = Get-CiwProp $st $Key
+    return [bool]((Test-CiwFilled $v) -and -not (Test-CiwMasked $v))
+}
+
+# v2.9 : raison pour laquelle la mise a jour (PUT) de ce connecteur partirait SANS le mot de passe du compte de migration (ou sans le secret
+# client) alors que le connecteur en detient un que la lecture ne rend pas. Le corps du PUT est la copie de la lecture : une valeur vide ou masquee en
+# est retiree, et l'effet d'un PUT sans cette cle sur la valeur stockee par le portail n'est PAS mesure (il pourrait l'effacer : l'audit ne
+# demarrerait plus, sans aucun signal). Tant que ce n'est pas mesure, la mise a jour est REFUSEE dans ces cas. '' = aucun risque, ou
+# -AllowConnectorUpdateWithoutPassword (usage avance, une fois le comportement mesure sur un projet de test).
+#   $WantUpn             : compte de service voulu par ce passage ('' si aucun) ;
+#   $WillSendPassword    : ce passage enverra un mot de passe de compte de service ;
+#   $WillSendSecret      : ce passage enverra un nouveau secret client.
+function Get-CiwPasswordlessPutReason($Detail, [string]$WantUpn, [bool]$WillSendPassword, [bool]$WillSendSecret) {
+    if ($null -eq $Detail) { return '' }
+    if ([bool](Get-CiwProp $script:Ctx 'AllowConnectorUpdateWithoutPassword')) { return '' }
+    $st = ConvertTo-CiwSettings $Detail
+    if (-not $st) { return '' }
+    $id = Get-CiwProp $Detail 'id'
+    $acc = "$(Get-CiwProp $st 'MigrationAccount')"
+    # Compte inchange (ou aucun compte voulu) : le connecteur garde son compte, donc doit garder son mot de passe.
+    $sameAcc = (-not $WantUpn) -or ($acc -ieq $WantUpn)
+    if ($acc -and $sameAcc -and -not $WillSendPassword -and -not (Test-CiwSecretReadable $Detail 'MigrationAccountPassword')) {
+        return "le connecteur $id porte le compte de migration '$acc', dont le portail ne rend pas le mot de passe a la lecture, et l'outil n'a aucun mot de passe a lui renvoyer dans ce passage (compte adopte, -WithoutServiceAccount, ou charge sans compte de service) : la mise a jour partirait SANS mot de passe et pourrait EFFACER celui que le portail detient (effet non mesure). Mise a jour refusee. Solutions : laisser l'outil gerer le compte de service (compte etiquete, sans -WithoutServiceAccount), ou fournir le mot de passe du compte adopte avec -ServiceAccountPassword, ou, une fois le comportement mesure sur un projet de test, -AllowConnectorUpdateWithoutPassword."
+    }
+    # Indice qu'un secret client est stocke : la cle RestClientSecret figure dans la lecture (meme vide ou masquee).
+    $hasSecretKey = $false
+    if ($st -is [System.Collections.IDictionary]) { $hasSecretKey = ($null -ne (Get-CiwKey $st 'RestClientSecret')) }
+    else { $hasSecretKey = (@($st.PSObject.Properties | Where-Object { $_.Name -ieq 'RestClientSecret' }).Count -gt 0) }
+    if ($hasSecretKey -and -not $WillSendSecret -and -not (Test-CiwSecretReadable $Detail 'RestClientSecret')) {
+        return "le connecteur $id declare un secret client (RestClientSecret) que le portail ne rend pas a la lecture, et ce passage n'en envoie pas de nouveau (-AuthMethod Certificate) : la mise a jour partirait SANS secret client et pourrait EFFACER celui que le portail detient (effet non mesure). Mise a jour refusee. Solutions : relancer avec -AuthMethod Both (defaut : certificat et secret client renouveles ensemble), ou, une fois le comportement mesure sur un projet de test, -AllowConnectorUpdateWithoutPassword."
+    }
+    return ''
 }
 
 # Marqueur a ecrire : nouveau (CIW1) si de nouveaux identifiants sont envoyes, sinon marqueur existant conserve, sinon ancienne marque.
@@ -1184,7 +1258,7 @@ function Invoke-CiwApplyConnectorCore {
             $crd = Get-CiwProp $c 'Credentials'
             $haveSaPwd = ($crd -is [System.Collections.IDictionary] -and [bool]$crd['ServiceAccountPassword'])
             if ([bool](Get-CiwProp $c 'ServiceAccountResetFailed') -or -not $haveSaPwd) {
-                Set-CiwError 'renouvellement du connecteur ANNULE : le mot de passe du compte de service n''a pas pu etre change dans Entra, donc aucun nouveau mot de passe ni nouveau certificat n''est envoye. Connecteur NON modifie (aucun PUT), il garde l''ancien certificat et l''ancien mot de passe ; le nouveau certificat deja ajoute a l''application est conserve et l''ancien n''est pas retire. Reinitialisez le mot de passe du compte de service a la main, ressaisissez-le dans le portail Cloudiway, puis relancez la meme commande.'
+                Set-CiwError 'renouvellement du connecteur ANNULE : le mot de passe du compte de service n''a pas pu etre change dans Entra, donc aucun nouveau mot de passe ni nouveau certificat n''est envoye. Connecteur NON modifie (aucun PUT), il garde l''ancien certificat et l''ancien mot de passe ; les anciens identifiants de l''application ne sont pas retires. Corrigez la cause (portee User-PasswordProfile.ReadWrite.All, role de l''operateur) puis relancez la meme commande ; a defaut reinitialisez le mot de passe du compte de service a la main et ressaisissez-le dans le portail Cloudiway.'
                 return $false
             }
         }
@@ -1211,6 +1285,10 @@ function Invoke-CiwApplyConnectorCore {
                 Set-CiwError "$($script:CiwNeedCertMsg). Connecteur non modifie (aucun PUT tente)."
                 return $false
             }
+            # v2.9 : dernier filet avant le PUT (le plan bloque deja ce cas) : jamais de mise a jour qui partirait sans le mot de passe du
+            # compte de migration ou sans le secret client que le connecteur detient et que la lecture ne rend pas.
+            $noPwd = Get-CiwPasswordlessPutReason $ex.Detail "$($d.ServiceAccountUpn)" ([bool]$d.ServiceAccountPwd) ([bool]($d.AuthMethod -in 'Secret', 'Both' -and $d.ClientSecret))
+            if ($noPwd) { Set-CiwError "application refusee : $noPwd Connecteur non modifie (aucun PUT tente)."; return $false }
             $b = New-CiwUpdateBody $ex.Detail $d
             $id = [int](Get-CiwProp $ex.Detail 'id')
             # B1 : instantane de ce que la lecture donnait, pour la verification apres coup (Test-CloudiwayCompliance).
@@ -1247,7 +1325,7 @@ function Invoke-CiwApplyConnectorCore {
         if (-not $respErr -and (Get-CiwProp $resp 'isSuccess') -ne $true) { $respErr = "reponse Cloudiway sans succes : $(Get-CiwFailText $resp)" }
         if ($respErr) {
             # Diagnostic : forme du corps envoye, secrets et certificat MASQUES (ConvertTo-MaskedConnectorBody).
-            try { Write-RunLog ('CIW corps envoye (masque) : ' + ((ConvertTo-MaskedConnectorBody $b) -replace '\s+', ' ')) } catch { }
+            try { Write-RunLog (Protect-CiwText ('CIW corps envoye (masque) : ' + ((ConvertTo-MaskedConnectorBody $b) -replace '\s+', ' '))) } catch { }
         }
 
         if ($sendCert) {
@@ -1289,7 +1367,7 @@ function Invoke-CiwApplyConnectorCore {
         $script:CiwPutCheck = $null
         $errText = Get-CiwErrMsg $_
         # Diagnostic : forme du corps envoye, secrets et certificat MASQUES (ConvertTo-MaskedConnectorBody).
-        try { if ($b) { Write-RunLog ('CIW corps envoye (masque) : ' + ((ConvertTo-MaskedConnectorBody $b) -replace '\s+', ' ')) } } catch { }
+        try { if ($b) { Write-RunLog (Protect-CiwText ('CIW corps envoye (masque) : ' + ((ConvertTo-MaskedConnectorBody $b) -replace '\s+', ' '))) } } catch { }
         Set-CiwError ("erreur a l'application : {0}" -f $errText)
         return $false
     } finally {
@@ -1350,6 +1428,13 @@ function New-CloudiwayConnectorPlan {
         if (-not $blk) { $blk = Get-CiwMissingAppReason $existing "$($want.AppId)" }
         if ($blk) {
             [void](Add-PlanItem $area $name 'BLOCKED' $blk)
+            return
+        }
+        # v2.9 : mise a jour qui partirait sans mot de passe / sans secret client (raison calculee avec la decision des identifiants, avant le
+        # plan Entra, pour qu'aucun certificat ni secret ne soit genere pour rien) : ligne BLOQUEE.
+        $noPwd = "$(Get-CiwProp $ctx 'PasswordlessPutReason')"
+        if ($noPwd) {
+            [void](Add-PlanItem $area $name 'BLOCKED' $noPwd)
             return
         }
         # B2 : adoption d'un connecteur fait a la main (sans marqueur, -AdoptExisting) : ce qui est REMPLACE est dit en clair ici,
@@ -1422,6 +1507,7 @@ function Invoke-CloudiwayDiscover {
         $r = Invoke-CiwRest -Method GET -Path "/Connectors/$ConnectorId"
         $d = Get-CiwData $r
         if ($null -eq $d) { Write-Host "Connecteur $ConnectorId introuvable ou reponse vide."; return $null }
+        Register-CiwReadSecrets @($d)   # v2.9 : secrets relus inscrits parmi les valeurs a retirer de tout message
         # rawSettings est une chaine JSON : on la deplie pour que le masquage s'applique a ses cles.
         $copy = [ordered]@{}
         if ($d -is [System.Collections.IDictionary]) { foreach ($k in $d.Keys) { $copy[$k] = $d[$k] } }
@@ -1434,6 +1520,9 @@ function Invoke-CloudiwayDiscover {
         $doc = [ordered]@{ _note = $note; connecteur = $copy }
         $file = if ($script:Ctx -and (Get-CiwProp $script:Ctx 'Out')) { Join-Path (Get-CiwProp $script:Ctx 'Out') "decouverte-$ConnectorId.json" } else { Join-Path (Get-Location).Path "decouverte-$ConnectorId.json" }
         $json = ConvertTo-MaskedJson $doc 10 -KeepKeys @('externalKey')   # externalKey = marqueur CIW1|empreinte|date, lisible et non secret
+        # v2.9 : apres le masquage par NOM de cle, les VALEURS secretes relues (mot de passe et contenu du PFX, renvoyes en clair par le portail)
+        # sont retirees du texte ou qu'elles se trouvent (cle au nom inattendu, valeur imbriquee dans une chaine).
+        $json = Protect-CiwText $json
         Set-Content -LiteralPath $file -Value $json -Encoding utf8
         Write-Host "Decouverte ecrite : $file"
         Write-RunLog "CIW decouverte : connecteur $ConnectorId ecrit dans $file"

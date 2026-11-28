@@ -1,15 +1,25 @@
 # Changelog: Cloudiway
 
-All notable changes to this solution are documented here. Versions follow [Semantic Versioning](https://semver.org/). Release tags are named `cloudiway-collector-vX.Y.Z`.
+All notable changes to this solution are documented here. Versions follow [Semantic Versioning](https://semver.org/). Release tags are named `cloudiway-collector-vX.Y.Z` and `cloudiway-connector-vX.Y.Z`.
+
+## Connector [2.9.0] - 2026-11-28
+
+Tag `cloudiway-connector-v2.9.0`. From this release on, the connector tag follows the script version. **Do not use earlier versions.**
+
+**Validation: offline test suite only. Version 2.9 has never been run against a real Microsoft 365 tenant or the real Cloudiway portal.** Run `-WhatIf` first. Full release notes: [`connector/changelog-2.9.md`](connector/changelog-2.9.md).
+
+- The EWS list is read with `-RetrieveEwsOperationAccessPolicy`, backed up, re-read before and after writing, and a rollback command is provided. Nothing is written if it cannot be read.
+- The sign-in requests the scope `User-PasswordProfile.ReadWrite.All` (new consent prompt); its effect on the HTTP 403 has not been measured. New parameters `-ServiceAccountPassword` and `-AllowConnectorUpdateWithoutPassword`.
+- Since 2.7: the **Teams** workload is accepted and Cloudiway product identifiers are built in. No real Teams or SharePoint migration has been run to date, and these workloads request write permissions on the target tenant.
 
 ## Connector: known issues in 2.7 and earlier (2026-11-25)
 
-**Do not run the connector on a production tenant until a fixed version is published.** No script is changed by this entry: only a warning is added to the guides and to the connector readme.
+**Do not use these versions: use 2.9.** At the date of this entry, only a warning had been added to the guides and to the connector readme.
 
 - `EwsAllowedAppIDs` is read without `Get-OrganizationConfig -RetrieveEwsOperationAccessPolicy`, so an existing list can appear empty. A confirmed "creation" (or `-AllowEwsListCreation`), and the manual commands printed by the script or written in the guides, can then replace the list and cut off other EWS applications.
 - A new run on an already configured tenant can fail with HTTP 403 (scope `User-PasswordProfile.ReadWrite.All` not requested) and add one more certificate and client secret on each attempt.
 
-*Ne pas lancer le connecteur sur un tenant de production avant la publication d'une version corrigée : la liste EWS peut apparaître vide et être écrasée ; une relance peut échouer en 403 et ajouter des identifiants à l'application. Vérifier d'abord la liste avec la commande indiquée en tête des guides.*
+*Ne pas utiliser ces versions : utiliser la 2.9. La liste EWS pouvait apparaître vide et être écrasée ; une relance pouvait échouer en 403 et ajouter des identifiants à l'application.*
 
 ## Connector [1.0.0] - 2026-11-04
 

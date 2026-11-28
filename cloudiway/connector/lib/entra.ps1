@@ -658,7 +658,11 @@ function Test-ConnectorNeedsAccountPassword {
     $st = ConvertTo-CiwSettings $ex
     if (-not $st) { return $true }
     $acc = "$(Get-CiwProp $st 'MigrationAccount')"
-    return ($acc -ine (Get-ServiceAccountUpn))
+    if ($acc -ine (Get-ServiceAccountUpn)) { return $true }
+    # v2.9 : meme compte, mais le portail ne rend pas son mot de passe a la lecture (vide ou masque : mesure reelle du 2026-11-25). La mise a
+    # jour du connecteur partirait donc SANS mot de passe : il faut en reinitialiser un et l'envoyer avec le nouveau certificat.
+    if (Get-Command Test-CiwSecretReadable -ErrorAction SilentlyContinue) { if (-not (Test-CiwSecretReadable $ex 'MigrationAccountPassword')) { return $true } }
+    return $false
 }
 
 # v2.5 (C) : texte unique de l'avertissement « valeurs de securite par defaut actives » (console, ligne du plan, rapport). L'outil ne les modifie JAMAIS.
@@ -712,6 +716,26 @@ function New-EntraPlan {
     $needSa = [bool](Get-EntraCtx 'NeedServiceAccount')
     $skipDep = 'application bloquee ou absente de l''etat : etape ignoree'
     $dec = Get-CredentialDecision $State
+    # v2.9 : si le renouvellement conduit a une mise a jour du connecteur qui partirait SANS le mot de passe du compte de migration (compte
+    # adopte sans -ServiceAccountPassword, -WithoutServiceAccount, charge sans compte de service) ou sans le secret client (-AuthMethod Certificate),
+    # rien n'est genere : la ligne Cloudiway sera BLOQUEE avec la raison (New-CloudiwayConnectorPlan), aucun certificat ni secret n'est empile.
+    Set-EntraCtx 'PasswordlessPutReason' ''
+    $exConn = Get-EntraCtx 'ExistingConnector'
+    if ($dec.Rotate -and -not $dec.Skip -and $exConn -and (Get-Command Get-CiwPasswordlessPutReason -ErrorAction SilentlyContinue)) {
+        $pr = ''
+        try {
+            $u0 = $State.ServiceAccount
+            $toolOwned = ($needSa -and [bool]$State.ServiceAccountOk -and ((-not $u0) -or ("$($u0.employeeType)" -eq $script:EntraTag)))
+            $willPwd = ($toolOwned -or ($needSa -and [bool](Get-EntraCtx 'ProvidedServiceAccountPassword')))
+            $wantUpn = if ($needSa) { "$(Get-ServiceAccountUpn)" } else { '' }
+            $pr = Get-CiwPasswordlessPutReason $exConn $wantUpn $willPwd ([bool]$dec.UseSecret)
+        } catch { $pr = '' }
+        if ($pr) {
+            Set-EntraCtx 'PasswordlessPutReason' $pr
+            $dec.Skip = $true
+            $dec.Reason = 'connecteur Cloudiway non modifiable dans ce passage (la mise a jour partirait sans le mot de passe du compte de migration ou sans le secret client : voir la ligne Cloudiway) : aucun identifiant genere'
+        }
+    }
     Set-EntraCtx 'CredentialsRotation' ([bool]($dec.Rotate -and -not $dec.Skip))
     Set-EntraCtx 'CredentialsRotationReason' $dec.Reason
     Set-EntraCtx 'ServiceAccountPasswordManual' $false
@@ -906,7 +930,14 @@ function New-EntraPlan {
             # D'ABORD ; le connecteur ne le recoit que si Entra l'a accepte (un compte qui detient un role d'administrateur peut refuser : HTTP 403).
             if ($resetPw) {
                 Set-EntraCtx 'ServiceAccountResetPending' $true
-                [void](Add-EntraItem 'ServiceAccountPwd' $nm 'UPDATE' ('nouveau mot de passe, reinitialise dans Entra AVANT l''ecriture du connecteur (le connecteur ne le recoit que si Entra l''a accepte ; si Entra refuse, le connecteur n''est pas modifie et garde son mot de passe) : ' + $dec.Reason) @{ Kind = 'SaPwdReset'; UserId = "$($u.id)" })
+                if ([bool](Get-EntraCtx 'PasswordScopeMissing')) {
+                    # v2.9 : portee de reinitialisation absente de la session (lue avant le plan) : ligne BLOQUEE, message clair, rien n'est tente.
+                    # Les lignes « identifiants de l'application » et « connecteur » en dependent : aucun certificat ni secret cree, aucun PUT.
+                    [void](Add-EntraItem 'ServiceAccountPwd' $nm 'BLOCKED' 'portee deleguee User-PasswordProfile.ReadWrite.All ABSENTE de la session Graph : le mot de passe du compte de service existant ne peut pas etre reinitialise (Graph repondrait HTTP 403). Aucun certificat ni secret n''est cree et le connecteur n''est pas modifie. Se reconnecter en acceptant cette portee (connexion interactive ou -UseDeviceCode : l''outil la demande), ou fournir un jeton (-GraphAccessToken) qui la porte ; l''operateur doit aussi etre Administrateur general ou Privileged Authentication Administrator.')
+                }
+                else {
+                    [void](Add-EntraItem 'ServiceAccountPwd' $nm 'UPDATE' ('nouveau mot de passe, reinitialise dans Entra AVANT la creation du certificat / du secret et AVANT l''ecriture du connecteur (le connecteur ne le recoit que si Entra l''a accepte ; si Entra refuse, aucun identifiant n''est cree, le connecteur n''est pas modifie et garde son mot de passe) : ' + $dec.Reason) @{ Kind = 'SaPwdReset'; UserId = "$($u.id)" })
+                }
             }
         }
         foreach ($r in @(Get-RequiredEntraRoles -Mode $mode -Workloads $workloads -WithoutServiceAccount:([bool](Get-EntraCtx 'WithoutServiceAccount')) | Where-Object Target -EQ 'ServiceAccount')) {
@@ -971,6 +1002,13 @@ function Get-GraphErrText($e) {
     try { $t += " $($e.ErrorDetails.Message)" } catch { }
     try { $t += " $($e.Exception.Message)" } catch { }
     return $t
+}
+
+# v2.8.1 : un refus d'autorisation (HTTP 403 / Authorization_RequestDenied / Insufficient privileges) est decide sur le CODE et le TEXTE de l'erreur, JAMAIS sur une chaine
+# qui contient un identifiant : un keyId (GUID aleatoire) peut contenir « 403 » (cause d'un test instable : repli PATCH declenche par erreur, mutation non detectee).
+function Test-GraphDenied($ErrorRecord) {
+    if ((Get-ErrCode $ErrorRecord) -eq 403) { return $true }
+    return ((Get-GraphErrText $ErrorRecord) -match 'Authorization_RequestDenied|Insufficient privileges')
 }
 
 # M5 : POST /applications/{id}/removeKey avec reessais. Un 400 Authentication_MissingOrMalformed (le nouveau certificat qui signe la preuve n'est pas
@@ -1260,8 +1298,16 @@ function Invoke-EntraApply([string]$Key) {
                 if (-not $newThumb) { $script:EntraLastError = 'nettoyage refuse : aucun nouveau certificat n''a ete genere dans ce passage. Aucune cle retiree.'; return $false }
                 if (-not [bool](Get-EntraCtx 'ConnectorWriteOk')) { $script:EntraLastError = 'nettoyage refuse : l''ecriture du connecteur Cloudiway n''est pas confirmee dans ce passage (le connecteur doit porter le nouveau certificat avant tout retrait). Aucune cle retiree.'; return $false }   # GARDE-CONNECTEUR
                 $prefix = Get-ToolKeyPrefix
-                $cur = Invoke-EntraRetry { Invoke-GraphGet ('/applications/{0}?$select=id,keyCredentials' -f $oid) }
-                $before = @($cur.keyCredentials)
+                # Propagation Entra (constate en reel le 2026-11-04) : le certificat ajoute quelques secondes plus tot, deja vu par la verification de CertCreate, peut ne pas
+                # etre encore lisible a CET instant (autre replique) : relire avec attente (0, 2, 4, 8, 12, 18 s), comme pour les secrets, avant de conclure qu'il est absent.
+                $before = @()
+                foreach ($w in 0, 2, 4, 8, 12, 18) {
+                    if ($w -gt 0) { Start-Sleep -Seconds $w }
+                    $cur = Invoke-EntraRetry { Invoke-GraphGet ('/applications/{0}?$select=id,keyCredentials' -f $oid) }
+                    $before = @($cur.keyCredentials)
+                    if (@($before | Where-Object { (ConvertTo-HexThumbprint $_.customKeyIdentifier) -eq $newThumb }).Count -gt 0) { break }
+                    Write-RunLog ("Nettoyage des certificats : nouveau certificat {0} pas encore visible (propagation), nouvelle lecture..." -f $newThumb)
+                }
                 if (@($before | Where-Object { (ConvertTo-HexThumbprint $_.customKeyIdentifier) -eq $newThumb }).Count -eq 0) {
                     $script:EntraLastError = "nettoyage refuse : le nouveau certificat ($newThumb) n'est pas visible dans l'application. Aucune cle retiree."
                     return $false
@@ -1274,6 +1320,7 @@ function Invoke-EntraApply([string]$Key) {
                 $info = [System.Collections.Generic.List[string]]::new()
                 $errs = [System.Collections.Generic.List[string]]::new()
                 $failedIds = [System.Collections.Generic.List[string]]::new()
+                $deniedIds = [System.Collections.Generic.List[string]]::new()   # v2.8.1 : refus d'autorisation (403), decides sur le code / le texte de l'erreur, jamais sur le keyId
                 foreach ($k0 in $old) {
                     $line = 'certificat keyId={0} empreinte={1} fin={2}' -f $k0.keyId, (ConvertTo-HexThumbprint $k0.customKeyIdentifier), $k0.endDateTime
                     Write-RunLog ("Nettoyage : retrait de l'ancien " + $line + ' (removeKey, preuve signee par le nouveau certificat)')
@@ -1287,6 +1334,7 @@ function Invoke-EntraApply([string]$Key) {
                     catch {
                         $em = Get-ErrMsg $_
                         $errs.Add(("{0} : {1}" -f $k0.keyId, $em)); $failedIds.Add("$($k0.keyId)")
+                        if (Test-GraphDenied $_) { $deniedIds.Add("$($k0.keyId)") }
                         # Diagnostic : message d'erreur renvoye (HTTP + texte Graph ; jamais le jeton de preuve) et type de l'exception locale.
                         Write-RunLog ("removeKey {0} : ECHEC [{1}] {2}" -f $k0.keyId, $_.Exception.GetType().Name, $em)
                         try { $raw = Get-GraphErrText $_; if ($raw) { Write-RunLog ("removeKey {0} : detail Graph : {1}" -f $k0.keyId, ($raw -replace '\s+', ' ')) } } catch { }
@@ -1297,7 +1345,7 @@ function Invoke-EntraApply([string]$Key) {
                 # ont ete refuses avec un 403 et qu'il n'existe aucune cle hors outil a preserver, PATCH keyCredentials ne gardant que le NOUVEAU
                 # certificat avec son contenu public (c'est l'absence de contenu qui avait fait echouer l'ancien PATCH : « KeyValue cannot be null or empty »).
                 # Echec du PATCH : rien ne change (les anciennes cles restent) et l'echec est signale comme avant.
-                if ($failedIds.Count -gt 0 -and $failedIds.Count -eq $old.Count -and @($errs | Where-Object { $_ -match '403|Authorization_RequestDenied|Insufficient privileges' }).Count -eq $errs.Count) {
+                if ($failedIds.Count -gt 0 -and $failedIds.Count -eq $old.Count -and $deniedIds.Count -eq $failedIds.Count) {
                     $others = @($before | Where-Object { $oldIds -notcontains "$($_.keyId)" -and (ConvertTo-HexThumbprint $_.customKeyIdentifier) -ne $newThumb })
                     $newKey = @($before | Where-Object { (ConvertTo-HexThumbprint $_.customKeyIdentifier) -eq $newThumb }) | Select-Object -First 1
                     if ($others.Count -eq 0 -and $newKey) {
@@ -1373,11 +1421,12 @@ function Invoke-EntraApply([string]$Key) {
                 if ($old.Count -eq 0) { Write-RunLog 'Nettoyage des secrets : aucun ancien secret client de l''outil'; return $true }
                 $info = [System.Collections.Generic.List[string]]::new()
                 $errs = [System.Collections.Generic.List[string]]::new()
+                $deniedCount = 0   # v2.8.1 : refus (403) comptes sur le code / le texte de l'erreur, jamais sur le keyId
                 foreach ($k0 in $old) {
                     $line = 'secret client keyId={0} fin={1}' -f $k0.keyId, $k0.endDateTime
                     Write-RunLog ("Nettoyage : retrait de l'ancien " + $line)
                     try { [void](Invoke-GraphPost "/applications/$oid/removePassword" @{ keyId = "$($k0.keyId)" }); $info.Add($line) }
-                    catch { $errs.Add(("{0} : {1}" -f $k0.keyId, (Get-ErrMsg $_))) }
+                    catch { $errs.Add(("{0} : {1}" -f $k0.keyId, (Get-ErrMsg $_))); if (Test-GraphDenied $_) { $deniedCount++ } }
                 }
                 $oldIds = @($old | ForEach-Object { "$($_.keyId)" })
                 $after = @(); $gone = $false
@@ -1400,7 +1449,7 @@ function Invoke-EntraApply([string]$Key) {
                 if ($errs.Count -gt 0) {
                     # removePassword refuse (403) : contrairement aux certificats (repli par PATCH), les secrets n'ont AUCUN repli (passwordCredentials n'est pas modifiable par PATCH).
                     $hint403 = ''
-                    if (@($errs | Where-Object { $_ -match '403|Authorization_RequestDenied|Insufficient privileges' }).Count -eq $errs.Count) { $hint403 = ' removePassword est refuse (403) et aucun repli par PATCH n''existe pour les secrets : retirer ces secrets a la main dans Entra (Inscriptions d''applications > Certificats et secrets). Le nouveau secret est en place et transmis.' }
+                    if ($deniedCount -eq $errs.Count) { $hint403 = ' removePassword est refuse (403) et aucun repli par PATCH n''existe pour les secrets : retirer ces secrets a la main dans Entra (Inscriptions d''applications > Certificats et secrets). Le nouveau secret est en place et transmis.' }
                     throw ('{0} secret(s) non retire(s) : {1}{2}' -f $errs.Count, ($errs -join ' ; '), $hint403)
                 }
                 if (-not $gone) { throw 'les anciens secrets de l''outil apparaissent encore dans l''application apres removePassword (propagation ?)' }
@@ -1452,7 +1501,9 @@ function Invoke-EntraApply([string]$Key) {
                     $pass = $null
                     $cred.Remove('ServiceAccountPassword')
                     Set-EntraCtx 'ServiceAccountResetFailed' $true
-                    $script:EntraLastError = ("le mot de passe du compte de service n'a pas pu etre change dans Entra ({0}) : le connecteur garde l'ancien mot de passe et n'est PAS modifie (aucun nouveau mot de passe ni nouveau certificat ne lui est envoye ; le nouveau certificat deja ajoute a l'application est conserve pour la relance, l'ancien n'est pas retire). Relancer avec -KeepCredentials n'y change rien : reinitialisez le mot de passe du compte de service a la main (centre d'administration Microsoft Entra), puis ressaisissez-le dans le portail Cloudiway (champ du compte de migration du connecteur)." -f (Get-ErrMsg $_))
+                    # v2.9 (M1) : cette etape passe AVANT la creation du certificat et du secret : un refus ne laisse plus aucun identifiant orphelin.
+                    $scopeHint = if (Test-GraphDenied $_) { ' Cause la plus probable d''un HTTP 403 : portee deleguee User-PasswordProfile.ReadWrite.All absente de la session, ou operateur ni Administrateur general ni Privileged Authentication Administrator (le compte de service detient un role d''administrateur).' } else { '' }
+                    $script:EntraLastError = ("le mot de passe du compte de service n'a pas pu etre change dans Entra ({0}) : le connecteur garde l'ancien mot de passe et n'est PAS modifie (aucun nouveau mot de passe ni nouveau certificat ne lui est envoye ; aucun certificat ni secret n'a ete cree dans l'application dans ce passage, les anciens ne sont pas retires).{1} Relancer avec -KeepCredentials n'y change rien : corrigez la cause puis relancez, ou reinitialisez le mot de passe du compte de service a la main (centre d'administration Microsoft Entra), puis ressaisissez-le dans le portail Cloudiway (champ du compte de migration du connecteur)." -f (Get-ErrMsg $_), $scopeHint)
                     Write-RunLog $script:EntraLastError
                     return $false
                 }
